@@ -1,0 +1,105 @@
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum EmailPurpose {
+  CERT_ALERT
+  TEST_EMAIL
+  VERIFY_EMAIL
+  PASSWORD_RESET
+}
+
+enum EmailStatus {
+  PENDING
+  SENT
+  FAILED
+  SKIPPED
+}
+
+model User {
+  id                        Int       @id @default(autoincrement())
+  email                     String    @unique
+  password                  String
+  name                      String?
+  emailVerifiedAt           DateTime?
+  notificationThresholdDays Int?
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
+
+  domains                 Domain[]
+  emailLogs               EmailLog[]
+  emailVerificationTokens EmailVerificationToken[]
+  passwordResetTokens     PasswordResetToken[]
+}
+
+model Domain {
+  id             Int       @id @default(autoincrement())
+  userId         Int
+  domain         String    @db.VarChar(253)
+  notes          String?   @db.Text
+  lastCheckedAt  DateTime?
+  certExpiresAt  DateTime?
+  certIssuer     String?   @db.VarChar(255)
+  certError      String?   @db.Text
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, domain])
+  @@index([userId])
+  @@index([certExpiresAt])
+}
+
+model EmailLog {
+  id          Int          @id @default(autoincrement())
+  userId      Int
+  requestedAt DateTime     @default(now())
+  sentAt      DateTime?
+  status      EmailStatus  @default(PENDING)
+  purpose     EmailPurpose @default(CERT_ALERT)
+  toEmail     String
+  subject     String
+  domains     String?      @db.Text
+  preview     String?      @db.Text
+  error       String?      @db.Text
+  updatedAt   DateTime     @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, sentAt])
+  @@index([userId, requestedAt])
+  @@index([userId, status, requestedAt])
+  @@index([userId, purpose, sentAt])
+}
+
+model EmailVerificationToken {
+  id        Int       @id @default(autoincrement())
+  userId    Int
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+}
+
+model PasswordResetToken {
+  id        Int       @id @default(autoincrement())
+  userId    Int
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+}

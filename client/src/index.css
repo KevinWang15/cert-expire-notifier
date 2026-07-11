@@ -1,0 +1,101 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 210 40% 98%;
+    --foreground: 222 47% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+    --primary: 222 47% 11%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 96%;
+    --secondary-foreground: 222 47% 11%;
+    --muted: 210 40% 96%;
+    --muted-foreground: 215 16% 47%;
+    --accent: 210 40% 96%;
+    --accent-foreground: 222 47% 11%;
+    --border: 214 32% 91%;
+    --input: 214 32% 91%;
+    --ring: 222 47% 11%;
+    --radius: 0.9rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    min-height: 100%;
+    background: hsl(var(--background));
+  }
+
+  body {
+    min-height: 100%;
+    margin: 0;
+    background:
+      radial-gradient(circle at top left, rgb(34 211 238 / 0.14), transparent 28rem),
+      radial-gradient(circle at top right, rgb(99 102 241 / 0.12), transparent 24rem),
+      hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-feature-settings:
+      "rlig" 1,
+      "calt" 1;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  button,
+  input,
+  textarea,
+  select {
+    font: inherit;
+  }
+
+  button:not(:disabled),
+  select:not(:disabled) {
+    cursor: pointer;
+  }
+
+  ::selection {
+    background: rgb(103 232 249 / 0.35);
+  }
+}
+
+@layer components {
+  .prose :where(h1, h2, h3) {
+    margin-top: 0.8rem;
+    margin-bottom: 0.35rem;
+    font-weight: 800;
+  }
+
+  .prose :where(p, ul, ol, pre, blockquote) {
+    margin-top: 0.45rem;
+    margin-bottom: 0.45rem;
+  }
+
+  .prose :where(ul, ol) {
+    padding-left: 1.15rem;
+  }
+
+  .prose :where(code) {
+    border-radius: 0.45rem;
+    background: rgb(15 23 42 / 0.06);
+    padding: 0.1rem 0.3rem;
+    font-size: 0.86em;
+  }
+
+  .prose :where(pre) {
+    overflow: auto;
+    border-radius: 0.9rem;
+    background: rgb(15 23 42 / 0.06);
+    padding: 0.75rem;
+  }
+
+  .prose :where(a) {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+}

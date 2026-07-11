@@ -1,0 +1,21 @@
+{
+  "name": "cert-expire-notifier",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently \"npm run dev --prefix server\" \"./scripts/dev-client.sh\"",
+    "run": "./run.sh",
+    "build": "concurrently \"npm run build --prefix server\" \"npm run build --prefix client\"",
+    "lint": "concurrently \"npm run lint --prefix server\" \"npm run lint --prefix client\"",
+    "format": "prettier --write .",
+    "prepare": "husky"
+  },
+  "lint-staged": {
+    "**/*": "prettier --write --ignore-unknown"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "husky": "^9.1.7",
+    "lint-staged": "^15.2.2",
+    "prettier": "^3.6.2"
+  }
+}

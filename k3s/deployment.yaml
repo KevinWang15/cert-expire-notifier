@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cert-expire-notifier
+  namespace: cert-expire-notifier
+  labels:
+    app.kubernetes.io/name: cert-expire-notifier
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cert-expire-notifier
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cert-expire-notifier
+    spec:
+      initContainers:
+        - name: prisma-migrate
+          image: ghcr.io/your-org/cert-expire-notifier:latest
+          imagePullPolicy: IfNotPresent
+          command: ["npx", "prisma", "migrate", "deploy"]
+          envFrom:
+            - secretRef:
+                name: cert-expire-notifier-secret
+      containers:
+        - name: cert-expire-notifier
+          image: ghcr.io/your-org/cert-expire-notifier:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+          envFrom:
+            - secretRef:
+                name: cert-expire-notifier-secret
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            successThreshold: 1
+            failureThreshold: 5
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5

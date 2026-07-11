@@ -1,0 +1,6 @@
+node_modules
+dist
+coverage
+client/dist
+.env
+.env.sample
