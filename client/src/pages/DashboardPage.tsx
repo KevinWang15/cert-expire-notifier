@@ -244,13 +244,13 @@ function getAgeInDays(date: string | null): number | null {
 }
 
 function getDomainHost(domain: string): string {
-  const colonIndex = domain.lastIndexOf(":");
+  const colonIndex = domain.indexOf(":");
   if (colonIndex === -1) {
     return domain;
   }
 
   const host = domain.slice(0, colonIndex);
-  const port = domain.slice(colonIndex + 1);
+  const port = domain.slice(colonIndex + 1).split(":", 1)[0];
   return host && /^\d+$/.test(port) ? host : domain;
 }
 
@@ -1943,8 +1943,12 @@ export default function DashboardPage() {
                     value={newDomain}
                     onChange={(e) => setNewDomain(e.target.value)}
                     className="mt-1 block w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm outline-none transition focus:border-slate-400 focus:ring-4 focus:ring-slate-200"
-                    placeholder="api.example.com or api.example.com:8443"
+                    placeholder="api.example.com or api.example.com:443:192.0.2.10"
                   />
+                  <p className="mt-1 text-xs text-slate-500">
+                    To bypass DNS, use curl-style <code>hostname:port:ip</code>. The hostname is
+                    still used for TLS/SNI.
+                  </p>
                 </label>
                 <label className="block">
                   <span className="text-xs font-bold uppercase tracking-wide text-slate-500">

@@ -2,7 +2,7 @@ import https from "https";
 import tls from "tls";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { SocksProxyAgent } from "socks-proxy-agent";
-import { DEFAULT_CERT_PORT, parseDomainTarget } from "../utils/domain";
+import { DEFAULT_CERT_PORT, normalizeDomain, parseDomainTarget } from "../utils/domain";
 
 const DEFAULT_CHECK_RETRY_ATTEMPTS = 3;
 const DEFAULT_CERT_CHECK_TIMEOUT_MS = 10000;
@@ -103,7 +103,8 @@ function normalizeCertCheckResult(result: CertCheckResult): CertCheckResult {
 }
 
 function checkCertForDomainViaProxy(
-  domain: string,
+  connectHost: string,
+  servername: string,
   port: number,
   proxyUrl: string,
 ): Promise<CertCheckResult> {
@@ -122,13 +123,16 @@ function checkCertForDomainViaProxy(
 
     const req = https.request(
       {
-        host: domain,
+        host: connectHost,
         port,
         path: "/",
         method: "HEAD",
         agent,
         rejectUnauthorized: false,
-        servername: domain,
+        servername,
+        headers: {
+          Host: port === DEFAULT_CERT_PORT ? servername : `${servername}:${port}`,
+        },
         timeout: DEFAULT_CERT_CHECK_TIMEOUT_MS,
       },
       (response) => {
@@ -196,10 +200,11 @@ export function checkCertForDomain(
 ): Promise<CertCheckResult> {
   const parsedTarget = parseDomainTarget(domain);
   const host = parsedTarget?.host ?? domain;
+  const connectHost = parsedTarget?.resolveAddress ?? host;
   const effectivePort = port ?? parsedTarget?.port ?? DEFAULT_CERT_PORT;
 
   if (options.proxyUrl) {
-    return checkCertForDomainViaProxy(host, effectivePort, options.proxyUrl);
+    return checkCertForDomainViaProxy(connectHost, host, effectivePort, options.proxyUrl);
   }
 
   return new Promise((resolve) => {
@@ -223,7 +228,7 @@ export function checkCertForDomain(
 
     socket = tls.connect(
       {
-        host,
+        host: connectHost,
         port: effectivePort,
         servername: host,
         rejectUnauthorized: false,
@@ -260,8 +265,7 @@ export async function checkCertForDomainWithRetries(
     };
   }
 
-  const targetLabel =
-    target.port === DEFAULT_CERT_PORT ? target.host : `${target.host}:${target.port}`;
+  const targetLabel = normalizeDomain(domain);
   const proxyUrls = getConfiguredProxyUrls();
   let lastResult: CertCheckResult = {
     expiresAt: null,
@@ -271,7 +275,7 @@ export async function checkCertForDomainWithRetries(
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      const result = normalizeCertCheckResult(await checkCertForDomain(target.host, target.port));
+      const result = normalizeCertCheckResult(await checkCertForDomain(domain));
       if (!result.error) {
         return result;
       }
@@ -301,7 +305,7 @@ export async function checkCertForDomainWithRetries(
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       try {
         const result = normalizeCertCheckResult(
-          await checkCertForDomain(target.host, target.port, { proxyUrl }),
+          await checkCertForDomain(domain, undefined, { proxyUrl }),
         );
         if (!result.error) {
           console.info(

@@ -40,7 +40,7 @@ model User {
 model Domain {
   id             Int       @id @default(autoincrement())
   userId         Int
-  domain         String    @db.VarChar(253)
+  domain         String    @db.VarChar(320)
   notes          String?   @db.Text
   lastCheckedAt  DateTime?
   certExpiresAt  DateTime?

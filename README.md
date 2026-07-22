@@ -22,6 +22,7 @@ SSL certificate monitoring dashboard with email verification, password recovery,
 - Safer JWT secret handling, stronger password minimum, normalized emails/domains, and safer certificate checker resolution.
 - Config import/export, renewal notes, grouped domain inventory, test-email button, and expiry alert cron job.
 - Optional per-domain certificate check ports using `hostname:port`; entries without a port continue to use 443.
+- Curl-style per-domain DNS overrides using `hostname:port:ip`; the hostname is preserved for TLS/SNI while the connection is made directly to the chosen IP address.
 
 ## Quick Start
 
@@ -56,6 +57,15 @@ SSL certificate monitoring dashboard with email verification, password recovery,
 
 Frontend: http://localhost:5173  
 Backend health: http://localhost:3000/api/health
+
+## Certificate targets
+
+Certificate targets support the following forms:
+
+- `api.example.com` checks port 443 using normal DNS resolution.
+- `api.example.com:8443` checks a custom port using normal DNS resolution.
+- `api.example.com:443:192.0.2.10` connects to `192.0.2.10` while using `api.example.com` for TLS/SNI.
+- `api.example.com:443:[2001:db8::10]` is the equivalent IPv6 override form.
 
 ## Email-related environment variables
 

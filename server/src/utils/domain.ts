@@ -1,8 +1,13 @@
-export const DEFAULT_CERT_PORT = 443;
+import { isIP } from "node:net";
 
-interface DomainTarget {
+export const DEFAULT_CERT_PORT = 443;
+export const MAX_DOMAIN_TARGET_LENGTH = 320;
+const MAX_HOSTNAME_LENGTH = 253;
+
+export interface DomainTarget {
   host: string;
   port: number;
+  resolveAddress?: string;
 }
 
 function parsePort(value: string): number | null {
@@ -41,6 +46,56 @@ function splitHostAndPort(value: string): { host: string; port: number | null } 
   return { host: host.replace(/\.$/, ""), port };
 }
 
+function splitDomainTarget(value: string): DomainTarget | null {
+  const resolveMatch = value.match(/^([^:]+):([^:]+):(.+)$/);
+  if (resolveMatch) {
+    const [, rawHost, rawPort, rawAddress] = resolveMatch;
+    const port = parsePort(rawPort);
+    if (port === null) {
+      return null;
+    }
+
+    const hasOpeningBracket = rawAddress.startsWith("[");
+    const hasClosingBracket = rawAddress.endsWith("]");
+    if (hasOpeningBracket !== hasClosingBracket) {
+      return null;
+    }
+
+    const resolveAddress =
+      hasOpeningBracket && hasClosingBracket ? rawAddress.slice(1, -1) : rawAddress;
+    const addressVersion = isIP(resolveAddress);
+    if (addressVersion === 0 || (addressVersion === 4 && hasOpeningBracket)) {
+      return null;
+    }
+
+    return {
+      host: rawHost.replace(/\.$/, ""),
+      port,
+      resolveAddress,
+    };
+  }
+
+  const target = splitHostAndPort(value);
+  if (!target) {
+    return null;
+  }
+
+  return {
+    host: target.host,
+    port: target.port ?? DEFAULT_CERT_PORT,
+  };
+}
+
+function formatDomainTarget(target: DomainTarget): string {
+  if (target.resolveAddress) {
+    const formattedAddress =
+      isIP(target.resolveAddress) === 6 ? `[${target.resolveAddress}]` : target.resolveAddress;
+    return `${target.host}:${target.port}:${formattedAddress}`;
+  }
+
+  return target.port === DEFAULT_CERT_PORT ? target.host : `${target.host}:${target.port}`;
+}
+
 export function normalizeDomain(raw: unknown): string {
   if (typeof raw !== "string") {
     return "";
@@ -52,20 +107,17 @@ export function normalizeDomain(raw: unknown): string {
     .replace(/^https?:\/\//, "")
     .replace(/[/?#].*$/, "");
 
-  const target = splitHostAndPort(value);
-  if (!target) {
-    return value.replace(/\.$/, "");
-  }
-
-  if (!target.port || target.port === DEFAULT_CERT_PORT) {
-    return target.host;
-  }
-
-  return `${target.host}:${target.port}`;
+  const target = splitDomainTarget(value);
+  return target ? formatDomainTarget(target) : value.replace(/\.$/, "");
 }
 
 function isValidHostname(hostname: string): boolean {
-  if (!hostname || hostname.length > 253 || hostname.includes(" ") || hostname.includes("*")) {
+  if (
+    !hostname ||
+    hostname.length > MAX_HOSTNAME_LENGTH ||
+    hostname.includes(" ") ||
+    hostname.includes("*")
+  ) {
     return false;
   }
 
@@ -84,15 +136,12 @@ function isValidHostname(hostname: string): boolean {
 
 export function parseDomainTarget(domain: string): DomainTarget | null {
   const normalizedDomain = normalizeDomain(domain);
-  const target = splitHostAndPort(normalizedDomain);
+  const target = splitDomainTarget(normalizedDomain);
   if (!target || !isValidHostname(target.host)) {
     return null;
   }
 
-  return {
-    host: target.host,
-    port: target.port ?? DEFAULT_CERT_PORT,
-  };
+  return target;
 }
 
 export function isValidDomain(domain: string): boolean {
@@ -104,12 +153,17 @@ export function getDomainValidationError(domain: string): string | null {
     return "Domain is required";
   }
 
-  if (domain.length > 253) {
-    return "Domain must be 253 characters or fewer";
+  const hostname = domain.split(":", 1)[0];
+  if (hostname.length > MAX_HOSTNAME_LENGTH) {
+    return `Domain must be ${MAX_HOSTNAME_LENGTH} characters or fewer`;
+  }
+
+  if (domain.length > MAX_DOMAIN_TARGET_LENGTH) {
+    return `Domain target must be ${MAX_DOMAIN_TARGET_LENGTH} characters or fewer`;
   }
 
   if (!isValidDomain(domain)) {
-    return "Enter a valid hostname, optionally with a port, for example api.example.com:8443";
+    return "Enter a valid hostname, optionally with a port or IP override, for example api.example.com:443:192.0.2.10";
   }
 
   return null;
