@@ -4,6 +4,8 @@ import { authMiddleware, AuthRequest } from "../middleware/auth";
 import { getDomainValidationError, normalizeDomain } from "../utils/domain";
 import { parseNotificationThresholdOverride } from "../services/notificationSettings";
 import { normalizeName, normalizeNotes } from "../utils/validation";
+import { parseWebhookConfig } from "../utils/webhook";
+import type { WebhookConfig } from "@shared/types/notifications";
 
 const router = Router();
 
@@ -25,18 +27,20 @@ interface ConfigImportPayload {
     notificationThresholdDays?: number | null;
   };
   domains?: ImportedDomainConfig[];
+  notifications?: { emailEnabled: boolean; webhooks: WebhookConfig[] };
 }
 
 function parseImportPayload(payload: unknown): {
   name?: string | null;
   notificationThresholdDays?: number | null;
   domains: ImportedDomainConfig[];
+  notifications?: { emailEnabled: boolean; webhooks: WebhookConfig[] };
 } {
   if (!payload || typeof payload !== "object") {
     throw new ConfigImportValidationError("Import payload must be a JSON object");
   }
 
-  const { version, app, user, domains } = payload as ConfigImportPayload;
+  const { version, app, user, domains, notifications } = payload as ConfigImportPayload;
 
   if (version !== EXPORT_VERSION) {
     throw new ConfigImportValidationError(
@@ -88,7 +92,34 @@ function parseImportPayload(payload: unknown): {
     }
   }
 
-  return { name, notificationThresholdDays, domains: [...normalizedDomains.values()] };
+  let normalizedNotifications;
+  if (notifications !== undefined) {
+    if (
+      !notifications ||
+      typeof notifications.emailEnabled !== "boolean" ||
+      !Array.isArray(notifications.webhooks)
+    ) {
+      throw new ConfigImportValidationError(
+        "Notifications must include emailEnabled and a webhooks array",
+      );
+    }
+    try {
+      normalizedNotifications = {
+        emailEnabled: notifications.emailEnabled,
+        webhooks: notifications.webhooks.map(parseWebhookConfig),
+      };
+    } catch (error) {
+      throw new ConfigImportValidationError(
+        error instanceof Error ? error.message : "Invalid webhook configuration",
+      );
+    }
+  }
+  return {
+    name,
+    notificationThresholdDays,
+    domains: [...normalizedDomains.values()],
+    notifications: normalizedNotifications,
+  };
 }
 
 router.use(authMiddleware);
@@ -101,6 +132,18 @@ router.get("/export", async (req: AuthRequest, res: Response) => {
         email: true,
         name: true,
         notificationThresholdDays: true,
+        notificationEmailEnabled: true,
+        webhookTargets: {
+          orderBy: { id: "asc" },
+          select: {
+            name: true,
+            enabled: true,
+            url: true,
+            method: true,
+            headers: true,
+            bodyTemplate: true,
+          },
+        },
         domains: {
           orderBy: { createdAt: "asc" },
           select: {
@@ -126,6 +169,7 @@ router.get("/export", async (req: AuthRequest, res: Response) => {
         notificationThresholdDays: user.notificationThresholdDays,
       },
       domains: user.domains,
+      notifications: { emailEnabled: user.notificationEmailEnabled, webhooks: user.webhookTargets },
     });
   } catch (err) {
     console.error("Export config error:", err);
@@ -135,9 +179,23 @@ router.get("/export", async (req: AuthRequest, res: Response) => {
 
 router.post("/import", async (req: AuthRequest, res: Response) => {
   try {
-    const { name, notificationThresholdDays, domains } = parseImportPayload(req.body);
+    const { name, notificationThresholdDays, domains, notifications } = parseImportPayload(
+      req.body,
+    );
 
     await prisma.$transaction(async (tx) => {
+      if (notifications) {
+        await tx.user.update({
+          where: { id: req.userId },
+          data: { notificationEmailEnabled: notifications.emailEnabled },
+        });
+        await tx.webhookTarget.deleteMany({ where: { userId: req.userId } });
+        if (notifications.webhooks.length) {
+          await tx.webhookTarget.createMany({
+            data: notifications.webhooks.map((webhook) => ({ ...webhook, userId: req.userId! })),
+          });
+        }
+      }
       if (name !== undefined || notificationThresholdDays !== undefined) {
         await tx.user.update({
           where: { id: req.userId },

@@ -1,6 +1,10 @@
 # syntax=docker/dockerfile:1
 
-FROM node:20-slim AS builder
+FROM node:20-slim AS base
+RUN apt-get update && apt-get install -y --no-install-recommends openssl \
+    && rm -rf /var/lib/apt/lists/*
+
+FROM base AS builder
 WORKDIR /app
 
 COPY shared /app/shared
@@ -17,7 +21,7 @@ RUN npm install
 COPY client ./
 RUN npm run build
 
-FROM node:20-slim AS production
+FROM base AS production
 WORKDIR /app/server
 ENV NODE_ENV=production
 

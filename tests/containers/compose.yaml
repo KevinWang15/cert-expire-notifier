@@ -1,0 +1,214 @@
+name: cert-expire-notifier-container-test
+
+x-mock: &mock
+  image: node:22-slim
+  command: ["node", "/fixtures/mock.mjs"]
+  volumes:
+    - ./:/fixtures:ro
+  networks: [test]
+  healthcheck:
+    test:
+      [
+        "CMD",
+        "node",
+        "-e",
+        "fetch('http://127.0.0.1:8080/__admin/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+      ]
+    interval: 2s
+    timeout: 3s
+    retries: 30
+
+services:
+  mysql:
+    image: mysql:8.4
+    command: ["--innodb-use-native-aio=0"]
+    environment:
+      MYSQL_ROOT_PASSWORD: container-root-only
+      MYSQL_DATABASE: cert_notifications
+      MYSQL_USER: monitor
+      MYSQL_PASSWORD: container-db-only
+    volumes:
+      - database:/var/lib/mysql
+    networks: [test]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "MYSQL_PWD=$$MYSQL_PASSWORD mysql -h 127.0.0.1 -u monitor -D cert_notifications -e 'SELECT 1'",
+        ]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+
+  certificates:
+    image: cert-expire-notifier-container-test:local
+    entrypoint: ["sh", "/fixtures/certificates.sh"]
+    volumes:
+      - ./:/fixtures:ro
+      - certificates:/certificates
+    networks: [test]
+
+  email:
+    <<: *mock
+    environment:
+      MOCK_KIND: email
+    volumes:
+      - ./:/fixtures:ro
+      - certificates:/certificates:ro
+    depends_on:
+      certificates:
+        condition: service_completed_successfully
+    networks:
+      test:
+        aliases: [email.api.engagelab.cc]
+
+  webhook:
+    <<: *mock
+    environment:
+      MOCK_KIND: webhook
+
+  certificate:
+    <<: *mock
+    environment:
+      MOCK_KIND: certificate
+    volumes:
+      - ./:/fixtures:ro
+      - certificates:/certificates:ro
+    depends_on:
+      certificates:
+        condition: service_completed_successfully
+    networks:
+      test:
+        aliases: [expiring.example.test, healthy.example.test, broken.example.test]
+
+  app: &app
+    image: cert-expire-notifier-container-test:local
+    build:
+      context: ../..
+      dockerfile: k3s/Dockerfile.multistage
+    command: ["sh", "-c", "npx prisma migrate deploy && exec node dist/server.js"]
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      TZ: UTC
+      PUBLIC_APP_URL: "http://localhost:${CONTAINER_TEST_APP_PORT:-23800}"
+      DATABASE_URL: mysql://monitor:container-db-only@mysql:3306/cert_notifications
+      JWT_SECRET: container-notification-test-only
+      ENGAGE_LAB_USERNAME: container-email-user
+      ENGAGE_LAB_API_KEY: container-email-key
+      ENGAGE_LAB_FROM_EMAIL: noreply@example.test
+      NODE_EXTRA_CA_CERTS: /certificates/ca.pem
+      # Keep automatic checks out of deterministic manual-check tests.
+      CERT_CHECK_CRON: "0 0 1 1 *"
+      CERT_EXPIRY_THRESHOLD_DAYS: "30"
+      WEBHOOK_ALLOW_PRIVATE_IPS: "true"
+    volumes:
+      - certificates:/certificates:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+      email:
+        condition: service_healthy
+      webhook:
+        condition: service_healthy
+      certificate:
+        condition: service_healthy
+    networks: [test]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 2s
+      timeout: 3s
+      start_period: 20s
+      retries: 60
+
+  cron-worker:
+    <<: *app
+    profiles: [cron]
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      TZ: UTC
+      PUBLIC_APP_URL: "http://localhost:${CONTAINER_TEST_APP_PORT:-23800}"
+      DATABASE_URL: mysql://monitor:container-db-only@mysql:3306/cert_notifications
+      JWT_SECRET: container-notification-test-only
+      ENGAGE_LAB_USERNAME: container-email-user
+      ENGAGE_LAB_API_KEY: container-email-key
+      ENGAGE_LAB_FROM_EMAIL: noreply@example.test
+      NODE_EXTRA_CA_CERTS: /certificates/ca.pem
+      CERT_CHECK_CRON: "*/5 * * * * *"
+      WEBHOOK_ALLOW_PRIVATE_IPS: "true"
+
+  gateway:
+    image: node:22-slim
+    command: ["node", "/fixtures/gateway.mjs"]
+    volumes:
+      - ./:/fixtures:ro
+    ports:
+      - "127.0.0.1:${CONTAINER_TEST_APP_PORT:-23800}:3000"
+      - "127.0.0.1:${CONTAINER_TEST_WEBHOOK_PORT:-23801}:8081"
+      - "127.0.0.1:${CONTAINER_TEST_EMAIL_PORT:-23802}:8082"
+      - "127.0.0.1:${CONTAINER_TEST_WEBSITE_PORT:-23803}:8083"
+    depends_on:
+      app:
+        condition: service_healthy
+    networks: [test, inspection]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  test:
+    image: node:22-slim
+    profiles: [test]
+    command: ["node", "/fixtures/run.mjs"]
+    environment:
+      APP_URL: http://app:3000
+      EMAIL_URL: http://email:8080
+      WEBHOOK_URL: http://webhook:8080
+      CERTIFICATE_URL: http://certificate:8080
+      PUBLIC_APP_URL: "http://localhost:${CONTAINER_TEST_APP_PORT:-23800}"
+    volumes:
+      - ./:/fixtures:ro
+      - ./artifacts:/artifacts
+    depends_on:
+      app:
+        condition: service_healthy
+    networks: [test]
+
+  browser:
+    image: ghcr.io/puppeteer/puppeteer:25.9.0
+    profiles: [browser]
+    user: root
+    environment:
+      PUPPETEER_CACHE_DIR: /home/pptruser/.cache/puppeteer
+    entrypoint: ["node", "/fixtures/browser.cjs"]
+    shm_size: 256mb
+    volumes:
+      - ./:/fixtures:ro
+      - ./artifacts:/artifacts
+    depends_on:
+      gateway:
+        condition: service_healthy
+    networks: [inspection]
+
+networks:
+  test:
+    internal: true
+  inspection:
+
+volumes:
+  database:
+  certificates:

@@ -34,6 +34,8 @@ interface BuildCertificateNotificationEmailArgs {
 export interface BuiltCertificateNotificationEmail {
   subject: string;
   html: string;
+  text: string;
+  shortText: string;
   preview: string;
   domainNames: string[];
 }
@@ -166,12 +168,54 @@ export async function buildCertificateNotificationEmail({
   return {
     subject,
     html,
+    text: [
+      `Hello ${user.name || user.email},`,
+      ...expiringDomains.map((domain) => {
+        const daysLeft = Math.ceil(
+          (domain.certExpiresAt.getTime() - referenceDate.getTime()) / MS_PER_DAY,
+        );
+        return `${domain.domain}: expires ${domain.certExpiresAt.toISOString()} (${daysLeft} days left)${domain.notes ? `\nNotes: ${domain.notes}` : ""}`;
+      }),
+      ...failedDomains.map(
+        (domain) =>
+          `${domain.domain}: check failed: ${domain.certError}${domain.notes ? `\nNotes: ${domain.notes}` : ""}`,
+      ),
+      `Notification window: ${thresholdDays} days.`,
+      "Cert Expire Notifier",
+    ].join("\n\n"),
+    shortText: [
+      subject,
+      ...expiringDomains.map((domain) => {
+        const daysLeft = Math.ceil(
+          (domain.certExpiresAt.getTime() - referenceDate.getTime()) / MS_PER_DAY,
+        );
+        return `${domain.domain}: ${daysLeft} days left (${domain.certExpiresAt.toISOString().split("T")[0]})`;
+      }),
+      ...failedDomains.map((domain) => `${domain.domain}: ${domain.certError}`),
+    ].join("\n"),
     preview: previewParts.join(" "),
     domainNames: [
       ...expiringDomains.map((domain) => domain.domain),
       ...failedDomains.map((domain) => domain.domain),
     ],
   };
+}
+
+export async function hasSentCertificateNotificationToday(
+  userId: number,
+  now = new Date(),
+): Promise<boolean> {
+  const where = {
+    userId,
+    purpose: "CERT_ALERT" as const,
+    status: "SENT" as const,
+    sentAt: { gte: startOfToday(now) },
+  };
+  const [email, webhook] = await Promise.all([
+    prisma.emailLog.findFirst({ where, select: { id: true } }),
+    prisma.webhookLog.findFirst({ where, select: { id: true } }),
+  ]);
+  return Boolean(email || webhook);
 }
 
 export async function getNextEligibleCertificateNotificationTime(
@@ -182,19 +226,12 @@ export async function getNextEligibleCertificateNotificationTime(
   sentToday: boolean;
 }> {
   const now = new Date();
-  const recentEmail = await prisma.emailLog.findFirst({
-    where: {
-      userId,
-      purpose: "CERT_ALERT",
-      status: "SENT",
-      sentAt: { gte: startOfToday(now) },
-    },
-  });
+  const sentToday = await hasSentCertificateNotificationToday(userId, now);
 
-  const searchFrom = recentEmail ? new Date(startOfTomorrow(now).getTime() - 60 * 1000) : now;
+  const searchFrom = sentToday ? new Date(startOfTomorrow(now).getTime() - 60 * 1000) : now;
   return {
     plannedFor: getNextCronRun(cronExpression, searchFrom),
-    sentToday: Boolean(recentEmail),
+    sentToday,
   };
 }
 

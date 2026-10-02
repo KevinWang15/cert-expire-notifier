@@ -45,6 +45,8 @@ import {
   XCircle,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
+import { NotificationsModal } from "@/components/NotificationsModal";
+import type { WebhookConfig } from "@shared/types/notifications";
 
 interface Domain {
   id: number;
@@ -106,6 +108,7 @@ interface ConfigExportPayload {
     domain: string;
     notes: string | null;
   }>;
+  notifications?: { emailEnabled: boolean; webhooks: WebhookConfig[] };
 }
 
 type EmailStatus = "PENDING" | "SENT" | "FAILED" | "SKIPPED";
@@ -635,6 +638,7 @@ export default function DashboardPage() {
   const [editNotes, setEditNotes] = useState("");
   const [expandedNotes, setExpandedNotes] = useState<Set<number>>(() => new Set());
   const [testEmailLoading, setTestEmailLoading] = useState(false);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [testEmailResult, setTestEmailResult] = useState<{
     type: "success" | "error";
     message: string;
@@ -1525,6 +1529,13 @@ export default function DashboardPage() {
               {importLoading ? "Importing" : "Import"}
             </button>
             <button
+              onClick={() => setNotificationsOpen(true)}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-semibold text-slate-100 transition hover:bg-white/10"
+            >
+              <SlidersHorizontal className="h-3.5 w-3.5" />
+              Notifications
+            </button>
+            <button
               onClick={handleTestEmail}
               disabled={testEmailLoading}
               className="inline-flex items-center gap-1.5 rounded-xl bg-cyan-300 px-3 py-2 text-xs font-bold text-slate-950 shadow-lg shadow-cyan-950/30 transition hover:bg-cyan-200 disabled:opacity-50"
@@ -1545,6 +1556,8 @@ export default function DashboardPage() {
           </div>
         </div>
       </header>
+
+      <NotificationsModal open={notificationsOpen} onClose={() => setNotificationsOpen(false)} />
 
       {testEmailResult ? renderAlert(testEmailResult, () => setTestEmailResult(null)) : null}
       {domainActionResult

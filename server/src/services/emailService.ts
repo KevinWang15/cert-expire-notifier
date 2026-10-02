@@ -9,7 +9,7 @@ export interface EmailPayload {
   html: string;
 }
 
-interface TrackedEmailPayload extends EmailPayload {
+export interface TrackedEmailPayload extends EmailPayload {
   userId: number;
   purpose: EmailPurpose;
   domains?: string[] | string | null;

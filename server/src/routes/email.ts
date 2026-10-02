@@ -3,7 +3,7 @@ import { authMiddleware, AuthRequest } from "../middleware/auth";
 import { rateLimit } from "../middleware/rateLimit";
 import prisma from "../prisma";
 import { sendTrackedEmail } from "../services/emailService";
-import { escapeHtml } from "../utils/html";
+import { testNotification } from "../services/notificationService";
 import {
   buildCertificateNotificationEmail,
   domainsExpiringBy,
@@ -43,6 +43,8 @@ async function buildUpcomingCertificateEmailResponse(userId: number) {
       name: true,
       emailVerifiedAt: true,
       notificationThresholdDays: true,
+      notificationEmailEnabled: true,
+      webhookTargets: { where: { enabled: true }, select: { id: true } },
       domains: {
         where: {
           OR: [{ certExpiresAt: { not: null }, certError: null }, { certError: { not: null } }],
@@ -71,6 +73,15 @@ async function buildUpcomingCertificateEmailResponse(userId: number) {
       nextRunAt: null,
       emails: [],
       note: "Verify your email before certificate alerts can be scheduled.",
+    };
+  }
+
+  if (!user.notificationEmailEnabled && user.webhookTargets.length === 0) {
+    return {
+      settings,
+      nextRunAt: null,
+      emails: [],
+      note: "Enable an email or webhook target to receive certificate alerts.",
     };
   }
 
@@ -277,24 +288,7 @@ router.post("/test", testEmailRateLimit, async (req: AuthRequest, res: Response)
       return;
     }
 
-    const displayName = escapeHtml(user.name || user.email);
-    const log = await sendTrackedEmail({
-      userId: user.id,
-      to: user.email,
-      subject: "Cert Expire Notifier - Test Email",
-      purpose: "TEST_EMAIL",
-      preview: "Test email requested from the dashboard.",
-      html: `
-        <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; color: #0f172a;">
-          <h2 style="color: #1a1a2e;">Test Email from Cert Expire Notifier</h2>
-          <p>Hello ${displayName},</p>
-          <p>This is a test email to confirm that your email notifications are working correctly.</p>
-          <p>If you received this email, your notification settings are properly configured.</p>
-          <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;" />
-          <p style="color: #888; font-size: 12px;">Cert Expire Notifier</p>
-        </div>
-      `,
-    });
+    const log = await sendTrackedEmail(testNotification(user));
 
     res.json({ success: true, message: "Test email sent successfully", email: log });
   } catch (err: unknown) {

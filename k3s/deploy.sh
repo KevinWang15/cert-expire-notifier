@@ -144,6 +144,7 @@ create_app_secret() {
     write_env_key CERT_CHECK_CRON
     write_env_key CERT_CHECK_PROXY_URLS
     write_env_key CERT_EXPIRY_THRESHOLD_DAYS
+    write_env_key WEBHOOK_ALLOW_PRIVATE_IPS
     write_env_key EMAIL_VERIFICATION_TOKEN_TTL_MINUTES
     write_env_key PASSWORD_RESET_TOKEN_TTL_MINUTES
   } >"$tmp_env"

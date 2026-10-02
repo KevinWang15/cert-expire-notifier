@@ -4,6 +4,7 @@ import authRoutes from "./routes/auth";
 import configRoutes from "./routes/config";
 import domainRoutes from "./routes/domains";
 import emailRoutes from "./routes/email";
+import notificationRoutes from "./routes/notifications";
 
 const router = Router();
 
@@ -30,5 +31,6 @@ router.use("/domains", domainRoutes);
 
 // Email routes
 router.use("/email", emailRoutes);
+router.use("/notifications", notificationRoutes);
 
 export default router;

@@ -2,12 +2,13 @@ import cron from "node-cron";
 import axios from "axios";
 import prisma from "../prisma";
 import { updateDomainCertificateState } from "./domainCertificateState";
-import { sendTrackedEmail } from "./emailService";
+import { sendNotification } from "./notificationService";
 import {
   buildCertificateNotificationEmail,
   domainsExpiringBy,
   domainsWithCheckFailures,
   MS_PER_DAY,
+  hasSentCertificateNotificationToday,
 } from "./certificateNotifications";
 import { resolveNotificationThresholdDays } from "./notificationSettings";
 import { getNextCronRun } from "../utils/cronSchedule";
@@ -76,9 +77,6 @@ async function sendCertificateNotifications(): Promise<void> {
     return;
   }
 
-  const todayStart = new Date();
-  todayStart.setHours(0, 0, 0, 0);
-
   let sentCount = 0;
 
   for (const user of users) {
@@ -92,16 +90,7 @@ async function sendCertificateNotifications(): Promise<void> {
     }
 
     try {
-      const recentEmail = await prisma.emailLog.findFirst({
-        where: {
-          userId: user.id,
-          purpose: "CERT_ALERT",
-          status: "SENT",
-          sentAt: { gte: todayStart },
-        },
-      });
-
-      if (recentEmail) {
+      if (await hasSentCertificateNotificationToday(user.id)) {
         console.log(`[CronJob] Already sent certificate alert to ${user.email} today, skipping`);
         continue;
       }
@@ -113,7 +102,7 @@ async function sendCertificateNotifications(): Promise<void> {
         thresholdDays,
       });
 
-      await sendTrackedEmail({
+      const result = await sendNotification({
         userId: user.id,
         to: user.email,
         subject: email.subject,
@@ -121,7 +110,14 @@ async function sendCertificateNotifications(): Promise<void> {
         domains: email.domainNames,
         preview: email.preview,
         html: email.html,
+        text: email.text,
+        shortText: email.shortText,
       });
+
+      if (!result.sent) {
+        console.log(`[CronJob] No successful certificate alert delivery for user ${user.id}`);
+        continue;
+      }
 
       sentCount += 1;
       console.log(
