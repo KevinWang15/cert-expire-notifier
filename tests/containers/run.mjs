@@ -146,7 +146,8 @@ const setEmail = (enabled, account = owner) =>
 const testTarget = (target, status = 200, account = owner) =>
   api(`/notifications/webhooks/${target.id}/test`, { method: "POST", status }, account);
 
-async function poll(action, timeout = 25000) {
+// Scheduled checks now allow transient failures to recover between attempts.
+async function poll(action, timeout = 60000) {
   const start = Date.now();
   while (Date.now() - start < timeout) {
     if (await action()) return;

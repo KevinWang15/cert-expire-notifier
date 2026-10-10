@@ -2,11 +2,11 @@ import { promises as dns } from "dns";
 import { isIP } from "net";
 import type { CertificateResult, IpCertificateResult } from "@shared/types/certificates";
 import { parseDomainTarget, type DomainTarget } from "../utils/domain";
-import {
-  CERT_CHECK_TIMEOUT_MS,
-  probeCertificate,
-  type CertificateTarget,
-} from "./certificateProbe";
+import { CERT_CHECK_TIMEOUT_MS, type CertificateTarget } from "./certificateProbe";
+import { getConfiguredProxyUrls } from "./certificateProxyConfig";
+import { checkCertificateWithRetries } from "./certificateRetries";
+
+export { logCertCheckProxyConfig } from "./certificateProxyConfig";
 
 const DEFAULT_CHECK_RETRY_ATTEMPTS = 3;
 const IP_CHECK_CONCURRENCY = 5;
@@ -14,40 +14,6 @@ const IP_CHECK_CONCURRENCY = 5;
 export interface DomainCertCheckResult extends CertificateResult<Date> {
   ip: string | null;
   ipResults: IpCertificateResult<Date>[];
-}
-
-function normalizeProxyUrl(proxyUrl: string): string {
-  const trimmed = proxyUrl.trim();
-  if (/^socks[45]?[ah]?:\/\//i.test(trimmed) || /^[a-zA-Z]+:\/\//.test(trimmed)) return trimmed;
-  return `https://${trimmed.replace(/^\/+/, "")}`;
-}
-
-function getConfiguredProxyUrls(): string[] {
-  return (process.env.CERT_CHECK_PROXY_URLS || "")
-    .split(/[\n,]/)
-    .map((entry) => entry.trim())
-    .filter(Boolean)
-    .map(normalizeProxyUrl);
-}
-
-function maskProxyUrl(proxyUrl: string): string {
-  try {
-    const parsed = new URL(proxyUrl);
-    if (parsed.username) parsed.username = "****";
-    if (parsed.password) parsed.password = "****";
-    return parsed.toString();
-  } catch {
-    return proxyUrl.replace(/\/\/([^:@/]+):([^@/]+)@/, "//****:****@");
-  }
-}
-
-export function logCertCheckProxyConfig(): void {
-  const proxyUrls = getConfiguredProxyUrls();
-  console.log(
-    proxyUrls.length === 0
-      ? "[CertChecker] No certificate check proxy fallbacks configured"
-      : `[CertChecker] Registered ${proxyUrls.length} certificate check proxy fallback(s): ${proxyUrls.map(maskProxyUrl).join(", ")}`,
-  );
 }
 
 async function resolveTargets(target: DomainTarget): Promise<CertificateTarget[]> {
@@ -76,26 +42,6 @@ async function resolveTargets(target: DomainTarget): Promise<CertificateTarget[]
   } finally {
     clearTimeout(timeout);
   }
-}
-
-async function checkTargetWithRetries(
-  target: CertificateTarget,
-  attempts: number,
-  proxyUrls: string[],
-): Promise<IpCertificateResult<Date>> {
-  let result: CertificateResult<Date> = {
-    expiresAt: null,
-    issuer: null,
-    error: "Certificate check failed",
-  };
-  // Every retry/fallback is pinned to this address, never a fresh DNS choice.
-  for (const proxyUrl of [undefined, ...proxyUrls]) {
-    for (let attempt = 0; attempt < attempts; attempt += 1) {
-      result = await probeCertificate(target, proxyUrl);
-      if (!result.error && result.expiresAt) return { ip: target.address, ...result };
-    }
-  }
-  return { ip: target.address, ...result };
 }
 
 export function summarizeCertificates(
@@ -150,9 +96,10 @@ export async function checkCertForDomainWithRetries(
   for (let index = 0; index < targets.length; index += IP_CHECK_CONCURRENCY) {
     ipResults.push(
       ...(await Promise.all(
-        targets
-          .slice(index, index + IP_CHECK_CONCURRENCY)
-          .map((target) => checkTargetWithRetries(target, Math.max(1, attempts), proxyUrls)),
+        targets.slice(index, index + IP_CHECK_CONCURRENCY).map(async (target) => ({
+          ip: target.address,
+          ...(await checkCertificateWithRetries(target, proxyUrls, Math.max(1, attempts))),
+        })),
       )),
     );
   }

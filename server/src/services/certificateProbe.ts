@@ -1,8 +1,8 @@
 import https from "https";
 import tls from "tls";
-import { isIP } from "net";
+import net, { isIP } from "net";
 import { HttpsProxyAgent } from "https-proxy-agent";
-import { SocksProxyAgent } from "socks-proxy-agent";
+import { SocksClient } from "socks";
 import type { CertificateResult } from "@shared/types/certificates";
 import { DEFAULT_CERT_PORT } from "../utils/domain";
 
@@ -36,21 +36,27 @@ function readCertificate(socket: tls.TLSSocket): CertificateResult<Date> {
 export function probeCertificate(
   target: CertificateTarget,
   proxyUrl?: string,
+  signal?: AbortSignal,
 ): Promise<CertificateResult<Date>> {
   return new Promise((resolve) => {
     let settled = false;
     let socket: tls.TLSSocket | undefined;
+    let transport: net.Socket | undefined;
     let request: ReturnType<typeof https.request> | undefined;
-    let agent: HttpsProxyAgent<string> | SocksProxyAgent | undefined;
+    let agent: HttpsProxyAgent<string> | undefined;
     const controller = new AbortController();
 
     const done = (result: CertificateResult<Date>) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
+      signal?.removeEventListener("abort", onAbort);
       // Before assignment, only the agent owns the connection. Once wrapped in
       // TLS, close the TLS socket rather than aborting its underlying transport.
-      if (!socket) controller.abort();
+      if (!socket) {
+        controller.abort();
+        transport?.destroy();
+      }
       socket?.destroy();
       request?.destroy();
       agent?.destroy();
@@ -62,6 +68,7 @@ export function probeCertificate(
         issuer: null,
         error: error instanceof Error ? error.message : "Certificate check failed",
       });
+    const onAbort = () => fail(new Error("Certificate check cancelled"));
     const timeout = setTimeout(() => fail(new Error("Connection timeout")), CERT_CHECK_TIMEOUT_MS);
     const read = (connected: tls.TLSSocket) => {
       try {
@@ -71,14 +78,23 @@ export function probeCertificate(
       }
     };
 
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+
     try {
       // Do not send an IP literal as SNI when monitoring a literal IPv4 target.
       const servername = isIP(target.hostname) ? undefined : target.hostname;
-      if (!proxyUrl) {
+      const connectTls = (tunnel?: net.Socket) => {
+        if (settled) {
+          tunnel?.destroy();
+          return;
+        }
         socket = tls.connect(
           {
-            host: target.address,
-            port: target.port,
+            ...(tunnel ? { socket: tunnel } : { host: target.address, port: target.port }),
             servername,
             rejectUnauthorized: false,
           },
@@ -88,15 +104,47 @@ export function probeCertificate(
         socket.on("close", () =>
           fail(new Error("Connection closed before receiving a certificate")),
         );
+      };
+      if (!proxyUrl) {
+        connectTls();
         return;
       }
 
-      agent = new URL(proxyUrl).protocol.startsWith("socks")
-        ? new SocksProxyAgent(proxyUrl, { timeout: CERT_CHECK_TIMEOUT_MS })
-        : new HttpsProxyAgent(proxyUrl, {
+      const proxy = new URL(proxyUrl);
+      if (proxy.protocol.startsWith("socks")) {
+        const host = proxy.hostname.replace(/^\[|\]$/g, "");
+        const port = Number(proxy.port) || 1080;
+        const userId = decodeURIComponent(proxy.username);
+        const password = decodeURIComponent(proxy.password);
+        // Own the TCP socket before negotiation so cancellation can close it.
+        // SOCKS agents do not expose their socket until negotiation finishes.
+        transport = net.connect({ host, port });
+        transport.on("error", fail);
+        transport.on("close", () => fail(new Error("SOCKS connection closed")));
+        transport.once("connect", () => {
+          SocksClient.createConnection({
+            command: "connect",
+            proxy: {
+              host,
+              port,
+              type: proxy.protocol.startsWith("socks4") ? 4 : 5,
+              userId,
+              password,
+            },
+            destination: { host: target.address, port: target.port },
+            existing_socket: transport,
             timeout: CERT_CHECK_TIMEOUT_MS,
-            signal: controller.signal,
-          });
+          })
+            .then(({ socket }) => connectTls(socket))
+            .catch(fail);
+        });
+        return;
+      }
+
+      agent = new HttpsProxyAgent(proxy, {
+        timeout: CERT_CHECK_TIMEOUT_MS,
+        signal: controller.signal,
+      });
       request = https.request({
         host: target.address,
         port: target.port,
