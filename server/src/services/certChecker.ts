@@ -1,38 +1,29 @@
-import https from "https";
-import tls from "tls";
-import { HttpsProxyAgent } from "https-proxy-agent";
-import { SocksProxyAgent } from "socks-proxy-agent";
-import { DEFAULT_CERT_PORT, normalizeDomain, parseDomainTarget } from "../utils/domain";
+import { promises as dns } from "dns";
+import { isIP } from "net";
+import type { CertificateResult, IpCertificateResult } from "@shared/types/certificates";
+import { parseDomainTarget, type DomainTarget } from "../utils/domain";
+import {
+  CERT_CHECK_TIMEOUT_MS,
+  probeCertificate,
+  type CertificateTarget,
+} from "./certificateProbe";
 
 const DEFAULT_CHECK_RETRY_ATTEMPTS = 3;
-const DEFAULT_CERT_CHECK_TIMEOUT_MS = 10000;
+const IP_CHECK_CONCURRENCY = 5;
 
-export interface CertCheckResult {
-  expiresAt: Date | null;
-  issuer: string | null;
-  error: string | null;
-}
-
-interface CertCheckOptions {
-  proxyUrl?: string;
+export interface DomainCertCheckResult extends CertificateResult<Date> {
+  ip: string | null;
+  ipResults: IpCertificateResult<Date>[];
 }
 
 function normalizeProxyUrl(proxyUrl: string): string {
   const trimmed = proxyUrl.trim();
-  if (/^socks[45]?[ah]?:\/\//i.test(trimmed) || /^[a-zA-Z]+:\/\//.test(trimmed)) {
-    return trimmed;
-  }
-
+  if (/^socks[45]?[ah]?:\/\//i.test(trimmed) || /^[a-zA-Z]+:\/\//.test(trimmed)) return trimmed;
   return `https://${trimmed.replace(/^\/+/, "")}`;
 }
 
 function getConfiguredProxyUrls(): string[] {
-  const configured = process.env.CERT_CHECK_PROXY_URLS;
-  if (!configured) {
-    return [];
-  }
-
-  return configured
+  return (process.env.CERT_CHECK_PROXY_URLS || "")
     .split(/[\n,]/)
     .map((entry) => entry.trim())
     .filter(Boolean)
@@ -42,10 +33,8 @@ function getConfiguredProxyUrls(): string[] {
 function maskProxyUrl(proxyUrl: string): string {
   try {
     const parsed = new URL(proxyUrl);
-    if (parsed.username || parsed.password) {
-      parsed.username = parsed.username ? "****" : "";
-      parsed.password = parsed.password ? "****" : "";
-    }
+    if (parsed.username) parsed.username = "****";
+    if (parsed.password) parsed.password = "****";
     return parsed.toString();
   } catch {
     return proxyUrl.replace(/\/\/([^:@/]+):([^@/]+)@/, "//****:****@");
@@ -54,278 +43,118 @@ function maskProxyUrl(proxyUrl: string): string {
 
 export function logCertCheckProxyConfig(): void {
   const proxyUrls = getConfiguredProxyUrls();
-  if (proxyUrls.length === 0) {
-    console.log("[CertChecker] No certificate check proxy fallbacks configured");
-    return;
-  }
-
   console.log(
-    `[CertChecker] Registered ${proxyUrls.length} certificate check proxy fallback(s): ${proxyUrls
-      .map(maskProxyUrl)
-      .join(", ")}`,
+    proxyUrls.length === 0
+      ? "[CertChecker] No certificate check proxy fallbacks configured"
+      : `[CertChecker] Registered ${proxyUrls.length} certificate check proxy fallback(s): ${proxyUrls.map(maskProxyUrl).join(", ")}`,
   );
 }
 
-function buildProxyAgent(proxyUrl: string): HttpsProxyAgent<string> | SocksProxyAgent {
-  const proxy = new URL(proxyUrl);
-  if (proxy.protocol.toLowerCase().startsWith("socks")) {
-    return new SocksProxyAgent(proxyUrl);
+async function resolveTargets(target: DomainTarget): Promise<CertificateTarget[]> {
+  if (target.resolveAddress || isIP(target.host)) {
+    return [
+      { hostname: target.host, port: target.port, address: target.resolveAddress || target.host },
+    ];
   }
 
-  return new HttpsProxyAgent(proxyUrl);
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    // Use the system resolver (including /etc/hosts), requesting both IPv4 and IPv6.
+    const addresses = await Promise.race([
+      dns.lookup(target.host, { all: true, verbatim: true }),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error("DNS lookup timeout")), CERT_CHECK_TIMEOUT_MS);
+      }),
+    ]);
+    const uniqueAddresses = [...new Set(addresses.map(({ address }) => address))].sort();
+    if (!uniqueAddresses.length) throw new Error("No IP addresses found");
+    return uniqueAddresses.map((address) => ({
+      hostname: target.host,
+      port: target.port,
+      address,
+    }));
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
-function readCertificateFromSocket(socket: tls.TLSSocket): CertCheckResult {
-  const cert = socket.getPeerCertificate();
-  if (!cert || !cert.valid_to) {
-    return { expiresAt: null, issuer: null, error: "No certificate found" };
-  }
-
-  const expiresAt = new Date(cert.valid_to);
-  if (Number.isNaN(expiresAt.getTime())) {
-    return { expiresAt: null, issuer: null, error: "Invalid certificate expiry" };
-  }
-
-  const issuer = cert.issuer ? [cert.issuer.O, cert.issuer.CN].filter(Boolean).join(" - ") : null;
-
-  return { expiresAt, issuer, error: null };
-}
-
-function normalizeCertCheckResult(result: CertCheckResult): CertCheckResult {
-  if (result.error || result.expiresAt) {
-    return result;
-  }
-
-  return {
-    ...result,
-    error: "Certificate check returned no expiry",
+async function checkTargetWithRetries(
+  target: CertificateTarget,
+  attempts: number,
+  proxyUrls: string[],
+): Promise<IpCertificateResult<Date>> {
+  let result: CertificateResult<Date> = {
+    expiresAt: null,
+    issuer: null,
+    error: "Certificate check failed",
   };
-}
-
-function checkCertForDomainViaProxy(
-  connectHost: string,
-  servername: string,
-  port: number,
-  proxyUrl: string,
-): Promise<CertCheckResult> {
-  return new Promise((resolve) => {
-    let settled = false;
-    const agent = buildProxyAgent(proxyUrl);
-
-    const done = (result: CertCheckResult) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      req.destroy();
-      resolve(result);
-    };
-
-    const req = https.request(
-      {
-        host: connectHost,
-        port,
-        path: "/",
-        method: "HEAD",
-        agent,
-        rejectUnauthorized: false,
-        servername,
-        headers: {
-          Host: port === DEFAULT_CERT_PORT ? servername : `${servername}:${port}`,
-        },
-        timeout: DEFAULT_CERT_CHECK_TIMEOUT_MS,
-      },
-      (response) => {
-        const socket = response.socket;
-        response.resume();
-        if (socket instanceof tls.TLSSocket) {
-          try {
-            done(readCertificateFromSocket(socket));
-          } catch (err: unknown) {
-            done({
-              expiresAt: null,
-              issuer: null,
-              error: err instanceof Error ? err.message : "Unknown certificate error",
-            });
-          }
-        } else {
-          done({
-            expiresAt: null,
-            issuer: null,
-            error: "Proxy response did not expose a TLS socket",
-          });
-        }
-      },
-    );
-
-    req.on("socket", (socket) => {
-      if (socket instanceof tls.TLSSocket) {
-        const resolveFromSocket = () => {
-          try {
-            done(readCertificateFromSocket(socket));
-          } catch (err: unknown) {
-            done({
-              expiresAt: null,
-              issuer: null,
-              error: err instanceof Error ? err.message : "Unknown certificate error",
-            });
-          }
-        };
-
-        const existingCert = socket.getPeerCertificate();
-        if (existingCert && existingCert.valid_to) {
-          resolveFromSocket();
-        } else {
-          socket.once("secureConnect", resolveFromSocket);
-        }
-      }
-    });
-
-    req.on("timeout", () => {
-      done({ expiresAt: null, issuer: null, error: "Connection timeout" });
-    });
-
-    req.on("error", (err) => {
-      done({ expiresAt: null, issuer: null, error: err.message });
-    });
-
-    req.end();
-  });
-}
-
-export function checkCertForDomain(
-  domain: string,
-  port?: number,
-  options: CertCheckOptions = {},
-): Promise<CertCheckResult> {
-  const parsedTarget = parseDomainTarget(domain);
-  const host = parsedTarget?.host ?? domain;
-  const connectHost = parsedTarget?.resolveAddress ?? host;
-  const effectivePort = port ?? parsedTarget?.port ?? DEFAULT_CERT_PORT;
-
-  if (options.proxyUrl) {
-    return checkCertForDomainViaProxy(connectHost, host, effectivePort, options.proxyUrl);
+  // Every retry/fallback is pinned to this address, never a fresh DNS choice.
+  for (const proxyUrl of [undefined, ...proxyUrls]) {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      result = await probeCertificate(target, proxyUrl);
+      if (!result.error && result.expiresAt) return { ip: target.address, ...result };
+    }
   }
+  return { ip: target.address, ...result };
+}
 
-  return new Promise((resolve) => {
-    let settled = false;
-    let socket: tls.TLSSocket | undefined;
-    let timeout: NodeJS.Timeout;
-
-    const done = (result: CertCheckResult) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timeout);
-      socket?.destroy();
-      resolve(result);
-    };
-
-    timeout = setTimeout(() => {
-      done({ expiresAt: null, issuer: null, error: "Connection timeout" });
-    }, DEFAULT_CERT_CHECK_TIMEOUT_MS);
-
-    socket = tls.connect(
-      {
-        host: connectHost,
-        port: effectivePort,
-        servername: host,
-        rejectUnauthorized: false,
-      },
-      () => {
-        try {
-          done(readCertificateFromSocket(socket as tls.TLSSocket));
-        } catch (err: unknown) {
-          done({
-            expiresAt: null,
-            issuer: null,
-            error: err instanceof Error ? err.message : "Unknown certificate error",
-          });
-        }
-      },
-    );
-
-    socket.on("error", (err) => {
-      done({ expiresAt: null, issuer: null, error: err.message });
-    });
-  });
+export function summarizeCertificates(
+  ipResults: IpCertificateResult<Date>[],
+): DomainCertCheckResult {
+  const earliest = ipResults
+    .filter((result) => !result.error && result.expiresAt)
+    .sort((a, b) => a.expiresAt!.getTime() - b.expiresAt!.getTime() || a.ip.localeCompare(b.ip))[0];
+  const failures = ipResults.filter((result) => result.error || !result.expiresAt);
+  return {
+    expiresAt: earliest?.expiresAt ?? null,
+    issuer: earliest?.issuer ?? null,
+    ip: earliest?.ip ?? null,
+    error: failures.length
+      ? `${failures.length} of ${ipResults.length} IP checks failed: ${failures.map((result) => `${result.ip} (${result.error || "No certificate expiry"})`).join("; ")}`
+      : ipResults.length
+        ? null
+        : "No IP addresses found",
+    ipResults,
+  };
 }
 
 export async function checkCertForDomainWithRetries(
   domain: string,
   attempts = DEFAULT_CHECK_RETRY_ATTEMPTS,
-): Promise<CertCheckResult> {
+): Promise<DomainCertCheckResult> {
   const target = parseDomainTarget(domain);
   if (!target) {
     return {
       expiresAt: null,
       issuer: null,
+      ip: null,
       error: "Invalid domain target",
+      ipResults: [],
+    };
+  }
+  let targets: CertificateTarget[];
+  try {
+    targets = await resolveTargets(target);
+  } catch (error) {
+    return {
+      expiresAt: null,
+      issuer: null,
+      ip: null,
+      ipResults: [],
+      error: `DNS lookup failed for ${target.host}: ${error instanceof Error ? error.message : "Unknown error"}`,
     };
   }
 
-  const targetLabel = normalizeDomain(domain);
   const proxyUrls = getConfiguredProxyUrls();
-  let lastResult: CertCheckResult = {
-    expiresAt: null,
-    issuer: null,
-    error: "Certificate check failed",
-  };
-
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    try {
-      const result = normalizeCertCheckResult(await checkCertForDomain(domain));
-      if (!result.error) {
-        return result;
-      }
-      lastResult = result;
-    } catch (err) {
-      lastResult = {
-        expiresAt: null,
-        issuer: null,
-        error: err instanceof Error ? err.message : "Certificate check failed",
-      };
-    }
-  }
-
-  if (proxyUrls.length === 0) {
-    console.warn(
-      `[CertChecker] Direct check failed for ${targetLabel} after ${attempts} attempts (${lastResult.error || "unknown error"}); no CERT_CHECK_PROXY_URLS configured`,
-    );
-    return lastResult;
-  }
-
-  console.warn(
-    `[CertChecker] Direct check failed for ${targetLabel} after ${attempts} attempts (${lastResult.error || "unknown error"}); trying ${proxyUrls.length} configured proxy fallback(s)`,
-  );
-
-  for (const proxyUrl of proxyUrls) {
-    const maskedProxyUrl = maskProxyUrl(proxyUrl);
-    for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      try {
-        const result = normalizeCertCheckResult(
-          await checkCertForDomain(domain, undefined, { proxyUrl }),
-        );
-        if (!result.error) {
-          console.info(
-            `[CertChecker] Proxy fallback succeeded for ${targetLabel} via ${maskedProxyUrl} on attempt ${attempt}`,
-          );
-          return result;
-        }
-        lastResult = result;
-      } catch (err) {
-        lastResult = {
-          expiresAt: null,
-          issuer: null,
-          error: err instanceof Error ? err.message : "Certificate check failed",
-        };
-      }
-    }
-    console.warn(
-      `[CertChecker] Proxy fallback failed for ${targetLabel} via ${maskedProxyUrl} after ${attempts} attempts (${lastResult.error || "unknown error"})`,
+  const ipResults: IpCertificateResult<Date>[] = [];
+  for (let index = 0; index < targets.length; index += IP_CHECK_CONCURRENCY) {
+    ipResults.push(
+      ...(await Promise.all(
+        targets
+          .slice(index, index + IP_CHECK_CONCURRENCY)
+          .map((target) => checkTargetWithRetries(target, Math.max(1, attempts), proxyUrls)),
+      )),
     );
   }
-
-  return lastResult;
+  return summarizeCertificates(ipResults);
 }

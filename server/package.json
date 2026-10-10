@@ -8,6 +8,7 @@
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
     "lint": "npm run typecheck",
+    "test:certificates": "TS_NODE_PROJECT=tsconfig.json node -r ts-node/register -r tsconfig-paths/register --test tests/certificates.test.cjs",
     "test:notifications": "TS_NODE_PROJECT=tsconfig.json node -r ts-node/register -r tsconfig-paths/register --test tests/notifications.test.cjs",
     "format": "prettier --write 'src/**/*.ts'",
     "prisma:setup": "node scripts/setup-env.js",

@@ -10,6 +10,12 @@ const reportPath = "/artifacts/report.json";
 const previousReport = await readFile(reportPath, "utf8")
   .then(JSON.parse)
   .catch(() => null);
+const previousLiveReport = await readFile("/artifacts/live-certificate-report.json", "utf8")
+  .then(JSON.parse)
+  .catch(() => null);
+const previousScenarioReport = await readFile("/artifacts/scenario-report.json", "utf8")
+  .then(JSON.parse)
+  .catch(() => null);
 const persistence = process.argv.includes("--persistence");
 const cron = process.argv.includes("--cron");
 const report =
@@ -182,6 +188,17 @@ async function run() {
         const savedDomains = await domains();
         assert.equal(savedDomains.length, 3);
         assert.ok(savedDomains.every((domain) => domain.lastCheckedAt));
+        const multiDomains = (await api("/domains", {}, report.multiIp)).domains;
+        assert.deepEqual(
+          multiDomains.map(({ certExpiresAt, certIssuer, certIp, certError, lastIpResults }) => ({
+            certExpiresAt,
+            certIssuer,
+            certIp,
+            certError,
+            lastIpResults,
+          })),
+          report.expectedIpSnapshots,
+        );
       },
     );
     report.status = "PASS";
@@ -279,6 +296,15 @@ async function run() {
     );
     report.expectedConfig = await api("/config/export");
     report.expectedHistory = (await history()).entries;
+    report.expectedIpSnapshots = (await api("/domains", {}, report.multiIp)).domains.map(
+      ({ certExpiresAt, certIssuer, certIp, certError, lastIpResults }) => ({
+        certExpiresAt,
+        certIssuer,
+        certIp,
+        certError,
+        lastIpResults,
+      }),
+    );
     report.status = "AWAITING_RESTART_CHECK";
     await saveReport();
     return;
@@ -297,6 +323,9 @@ async function run() {
       previousReport?.webhookOnly,
       previousReport?.retry,
       previousReport?.disabled,
+      previousReport?.multiIp,
+      previousLiveReport?.account,
+      previousScenarioReport?.account,
     ]) {
       if (!account?.token || !account.email?.startsWith("container-")) continue;
       for (const domain of (await api("/domains", {}, account)).domains)
@@ -556,6 +585,44 @@ async function run() {
     },
   );
   report.status = "AWAITING_CRON_CHECK";
+  await step(
+    "multiple DNS addresses persist distinct certificates and partial failures without hiding expiry",
+    async () => {
+      report.multiIp = stranger;
+      await addDomain("healthy.example.test:8444", stranger);
+      const multi = await addDomain("multi.example.test:8443", stranger);
+      const partial = await addDomain("partial.example.test:8445", stranger);
+      const single = (await api(`/domains/${multi.id}/check`, { method: "POST" }, stranger)).domain;
+      assert.equal(single.lastIpResults.length, 2);
+      assert.equal(single.certError, null);
+      const sorted = [...single.lastIpResults].sort(
+        (a, b) => Date.parse(a.expiresAt) - Date.parse(b.expiresAt),
+      );
+      assert.ok(Date.parse(sorted[0].expiresAt) < Date.parse(sorted[1].expiresAt));
+      assert.equal(single.certExpiresAt, sorted[0].expiresAt);
+      assert.equal(single.certIssuer, sorted[0].issuer);
+      assert.equal(single.certIp, sorted[0].ip);
+      const checked = (await api("/domains/check-all", { method: "POST" }, stranger)).domains;
+      const failed = checked.find((domain) => domain.id === partial.id);
+      assert.equal(failed.lastIpResults.length, 2);
+      assert.equal(failed.lastIpResults.filter((entry) => entry.error).length, 1);
+      assert.ok(failed.certExpiresAt && failed.certIp);
+      assert.match(failed.certError, /1 of 2 IP checks failed/);
+      const upcoming = (await api("/email/upcoming", {}, stranger)).emails[0];
+      assert.ok(upcoming.domains.some((domain) => domain.domain === partial.domain));
+      assert.ok(upcoming.failedDomains.some((domain) => domain.domain === partial.domain));
+      assert.ok(upcoming.html.includes(failed.certIp));
+      await setEmail(false, stranger);
+      // Import resets the snapshot along with the scalar certificate fields.
+      const exported = await api("/config/export", {}, stranger);
+      await api("/config/import", { method: "POST", body: exported }, stranger);
+      const reset = (await api("/domains", {}, stranger)).domains;
+      assert.ok(
+        reset.every((domain) => domain.certIp === null && domain.lastIpResults.length === 0),
+      );
+      await api("/domains/check-all", { method: "POST" }, stranger);
+    },
+  );
   await saveReport();
   console.log(`PASS: ${report.steps.length} checks before the scheduled notification phase.`);
 }

@@ -1,0 +1,3 @@
+ALTER TABLE `Domain`
+    ADD COLUMN `certIp` VARCHAR(45) NULL,
+    ADD COLUMN `lastIpResults` JSON NULL;

@@ -144,9 +144,11 @@ if (kind === "email") {
 }
 
 if (kind === "certificate") {
+  const secondary = process.env.CERTIFICATE_PROFILE === "healthy";
   for (const [port, name] of [
-    [8443, "expiring"],
+    [8443, secondary ? "healthy" : "expiring"],
     [8444, "healthy"],
+    ...(!secondary ? [[8445, "expiring"]] : []),
   ]) {
     https
       .createServer(

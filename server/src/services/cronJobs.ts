@@ -65,6 +65,7 @@ async function sendCertificateNotifications(): Promise<void> {
         select: {
           domain: true,
           certExpiresAt: true,
+          certIp: true,
           notes: true,
           certError: true,
         },

@@ -232,7 +232,9 @@ router.post("/import", async (req: AuthRequest, res: Response) => {
             lastCheckedAt: null,
             certExpiresAt: null,
             certIssuer: null,
+            certIp: null,
             certError: null,
+            lastIpResults: [],
           },
           create: {
             userId: req.userId!,

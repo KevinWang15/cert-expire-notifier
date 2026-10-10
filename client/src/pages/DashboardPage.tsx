@@ -46,6 +46,8 @@ import {
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import { NotificationsModal } from "@/components/NotificationsModal";
+import { IpCertificatesBadge } from "@/components/IpCertificatesBadge";
+import type { IpCertificateResult } from "@shared/types/certificates";
 import type { WebhookConfig } from "@shared/types/notifications";
 
 interface Domain {
@@ -55,7 +57,9 @@ interface Domain {
   lastCheckedAt: string | null;
   certExpiresAt: string | null;
   certIssuer: string | null;
+  certIp: string | null;
   certError: string | null;
+  lastIpResults: IpCertificateResult[] | null;
   createdAt: string;
 }
 
@@ -426,10 +430,8 @@ function compareDomains(
     result = compareStrings(a.domain, b.domain, sortDirection);
   } else if (sortBy === "baseDomain") {
     result = compareStrings(getBaseDomain(a.domain), getBaseDomain(b.domain), sortDirection);
-  } else if (sortBy === "expiry") {
+  } else if (sortBy === "expiry" || sortBy === "daysLeft") {
     result = compareNullableNumbers(getExpiryTimestamp(a), getExpiryTimestamp(b), sortDirection);
-  } else if (sortBy === "daysLeft") {
-    result = compareNullableNumbers(getDaysUntilExpiry(a), getDaysUntilExpiry(b), sortDirection);
   } else if (sortBy === "lastChecked") {
     result = compareNullableNumbers(
       getLastCheckedTimestamp(a),
@@ -596,7 +598,9 @@ function getGroupStats(domains: Domain[]) {
 }
 
 function defaultSortDirection(sortBy: SortBy): SortDirection {
-  return sortBy === "domain" || sortBy === "baseDomain" || sortBy === "issuer" ? "asc" : "desc";
+  return sortBy === "lastChecked" || sortBy === "created" || sortBy === "notesLength"
+    ? "desc"
+    : "asc";
 }
 
 function SortIcon({ active, direction }: { active: boolean; direction: SortDirection }) {
@@ -615,7 +619,7 @@ export default function DashboardPage() {
   const { user, logout } = useAuth();
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const [domains, setDomains] = useState<Domain[]>([]);
-  const [sortBy, setSortBy] = useState<SortBy>("status");
+  const [sortBy, setSortBy] = useState<SortBy>("expiry");
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
@@ -1267,7 +1271,19 @@ export default function DashboardPage() {
                 </div>
               </div>
             </td>
-            <td className="whitespace-nowrap px-3 py-2.5 align-top">{renderStatusPill(domain)}</td>
+            <td className="px-3 py-2.5 align-top">
+              <div className="flex flex-wrap items-center gap-1.5">
+                {renderStatusPill(domain)}
+                {domain.lastIpResults?.length ? (
+                  <IpCertificatesBadge
+                    results={domain.lastIpResults}
+                    earliestIp={domain.certIp}
+                    domain={domain.domain}
+                    needsAttention={status.key !== "healthy"}
+                  />
+                ) : null}
+              </div>
+            </td>
             <td className="px-3 py-2.5 align-top">
               <div className={`font-semibold ${getExpiryColor(domain.certExpiresAt)}`}>
                 {domain.certExpiresAt ? formatRelativeDate(domain.certExpiresAt) : "Expiry unknown"}
@@ -1277,6 +1293,11 @@ export default function DashboardPage() {
                   ? formatDate(domain.certExpiresAt)
                   : "No certificate data yet"}
               </div>
+              {domain.certIp ? (
+                <div className="mt-1 break-all text-[11px] text-slate-500">
+                  Earliest: <span className="font-mono">{domain.certIp}</span>
+                </div>
+              ) : null}
               <div className="mt-2 h-1.5 rounded-full bg-slate-100">
                 <div
                   className={`h-1.5 rounded-full ${status.dot}`}
@@ -1306,7 +1327,9 @@ export default function DashboardPage() {
                 {domain.certIssuer || "Unknown issuer"}
               </div>
               {domain.certError ? (
-                <div className="mt-1 line-clamp-2 text-xs text-rose-600">{domain.certError}</div>
+                <div title={domain.certError} className="mt-1 line-clamp-2 text-xs text-rose-600">
+                  {domain.certError}
+                </div>
               ) : null}
             </td>
             <td className="px-3 py-2.5 align-top">

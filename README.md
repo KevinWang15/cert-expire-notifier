@@ -24,6 +24,7 @@ SSL certificate monitoring dashboard with email verification, password recovery,
 - Config import/export, renewal notes, grouped domain inventory, test-email button, and expiry alert cron job.
 - Optional per-domain certificate check ports using `hostname:port`; entries without a port continue to use 443.
 - Curl-style per-domain DNS overrides using `hostname:port:ip`; the hostname is preserved for TLS/SNI while the connection is made directly to the chosen IP address.
+- Checks every resolved IPv4 and IPv6 address, with the earliest certificate expiry driving the dashboard and notifications and an IP-count badge showing each address's certificate or error.
 
 ## Quick Start
 
@@ -67,6 +68,12 @@ Certificate targets support the following forms:
 - `api.example.com:8443` checks a custom port using normal DNS resolution.
 - `api.example.com:443:192.0.2.10` connects to `192.0.2.10` while using `api.example.com` for TLS/SNI.
 - `api.example.com:443:[2001:db8::10]` is the equivalent IPv6 override form.
+
+For targets without an override, each check resolves all addresses once using the system resolver (including `/etc/hosts`), removes duplicates, and checks each IP independently. Direct retries and configured proxy fallbacks stay pinned to that IP, preserving the domain for TLS/SNI. Up to five addresses per domain are checked concurrently. Explicit IP overrides check only the specified address.
+
+The stored domain expiry, issuer, and `certIp` describe the certificate with the earliest expiry in the latest check. `lastIpResults` contains each IP's expiry, issuer, and error. The dashboard defaults to earliest expiry first; hover, focus, or click the IP-count badge for details. A failed IP remains visible even when other IPs succeed, and a partial failure can trigger both an expiry alert and a failed-check alert in the same notification. If no IP returns a certificate, the latest expiry and issuer are cleared. DNS changes replace the previous address snapshot on the next check.
+
+Apply database migrations before starting the updated server. Existing domains gain per-IP details on their next manual or scheduled check.
 
 ## Notifications
 
@@ -136,6 +143,8 @@ Test sends require a verified account and are limited to five requests per user 
 | `WEBHOOK_ALLOW_PRIVATE_IPS`            | Allow webhook destinations on private/reserved networks, default `false`.                                                                                                                                                                                              |
 
 ## Tests
+
+Run `npm run test:certificates --prefix server` for per-IP checks, retries, proxy pinning, snapshot replacement, and partial-failure alerts. These tests use local TLS servers and require OpenSSL.
 
 Run `npm run test:notifications --prefix server` for template, validation, and destination checks. Run `npm run test:containers` for the production app, MySQL, mock HTTPS EngageLab API, webhook receiver, and TLS certificate targets. The container suite exercises the real scheduler and checks persistence after restarting the app. See [container test instructions](tests/containers/README.md).
 

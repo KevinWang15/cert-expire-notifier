@@ -1,0 +1,46 @@
+# Three independent local IPs serve different certificates for each shared DNS name.
+x-certificate-node: &certificate-node
+  image: cert-expire-notifier-container-test:local
+  entrypoint: ["node", "/fixtures/scenario-node.mjs"]
+  volumes:
+    - ./:/fixtures:ro
+  networks:
+    test:
+      aliases: [checkout.example.test, api.example.test, assets.example.test]
+  healthcheck:
+    test:
+      [
+        "CMD",
+        "node",
+        "-e",
+        "fetch('http://127.0.0.1:8080/__admin/state').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+      ]
+    interval: 2s
+    timeout: 3s
+    retries: 30
+
+services:
+  certificate-node-1:
+    <<: *certificate-node
+    environment:
+      FIXTURE_NODE: "1"
+  certificate-node-2:
+    <<: *certificate-node
+    environment:
+      FIXTURE_NODE: "2"
+  certificate-node-3:
+    <<: *certificate-node
+    environment:
+      FIXTURE_NODE: "3"
+
+  scenario:
+    image: cert-expire-notifier-container-test:local
+    profiles: [scenario]
+    entrypoint: ["node", "/fixtures/scenario-check.mjs"]
+    volumes:
+      - ./:/fixtures:ro
+      - ./artifacts:/artifacts
+    networks: [test]
+
+  browser:
+    networks: [test, inspection]

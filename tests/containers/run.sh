@@ -7,7 +7,8 @@ mkdir -p "$TASK_DIR/artifacts"
 
 "${TASK_COMPOSE[@]}" stop cron-worker >/dev/null 2>&1 || true
 trap '"${TASK_COMPOSE[@]}" stop cron-worker >/dev/null 2>&1 || true' EXIT
-"${TASK_COMPOSE[@]}" build app
+"${TASK_COMPOSE[@]}" build app unit
+"${TASK_COMPOSE[@]}" run --rm --no-deps unit
 "${TASK_COMPOSE[@]}" up --detach --wait --wait-timeout 180 app email webhook certificate gateway
 "${TASK_COMPOSE[@]}" run --rm --no-deps test
 "${TASK_COMPOSE[@]}" up --detach --no-build --wait --wait-timeout 120 cron-worker

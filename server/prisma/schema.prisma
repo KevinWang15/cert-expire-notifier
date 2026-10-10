@@ -84,7 +84,9 @@ model Domain {
   lastCheckedAt  DateTime?
   certExpiresAt  DateTime?
   certIssuer     String?   @db.VarChar(255)
+  certIp         String?   @db.VarChar(45)
   certError      String?   @db.Text
+  lastIpResults  Json?
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 

@@ -1,0 +1,17 @@
+# Opt-in Internet access for live certificate validation. Email/webhook mocks stay local.
+services:
+  app:
+    networks: [test, inspection]
+
+  live-certificates:
+    image: cert-expire-notifier-container-test:local
+    profiles: [live]
+    entrypoint: ["node", "/fixtures/live-certificates.mjs"]
+    environment:
+      APP_URL: http://app:3000
+      EMAIL_URL: http://email:8080
+      LIVE_CERT_DOMAIN: "${LIVE_CERT_DOMAIN:?Set LIVE_CERT_DOMAIN to a multi-IP hostname to test}"
+    volumes:
+      - ./:/fixtures:ro
+      - ./artifacts:/artifacts
+    networks: [test, inspection]

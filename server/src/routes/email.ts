@@ -53,6 +53,7 @@ async function buildUpcomingCertificateEmailResponse(userId: number) {
         select: {
           domain: true,
           certExpiresAt: true,
+          certIp: true,
           notes: true,
           certError: true,
         },

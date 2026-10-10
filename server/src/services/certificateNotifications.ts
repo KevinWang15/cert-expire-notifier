@@ -8,6 +8,7 @@ export const MS_PER_DAY = 1000 * 60 * 60 * 24;
 export interface ExpiringCertificateNotificationDomain {
   domain: string;
   certExpiresAt: Date;
+  certIp?: string | null;
   notes: string | null;
 }
 
@@ -75,7 +76,7 @@ export async function buildCertificateNotificationEmail({
 
       return `
         <tr>
-          <td style="padding: 8px 12px; border-bottom: 1px solid #eee; font-weight: bold;">${escapeHtml(domain.domain)}</td>
+          <td style="padding: 8px 12px; border-bottom: 1px solid #eee; font-weight: bold;">${escapeHtml(domain.domain)}${domain.certIp ? `<br><small>Earliest expiry: ${escapeHtml(domain.certIp)}</small>` : ""}</td>
           <td style="padding: 8px 12px; border-bottom: 1px solid #eee; color: ${riskColor};">
             ${domain.certExpiresAt.toISOString().split("T")[0]} (${daysLeft} day${daysLeft === 1 ? "" : "s"} left)
           </td>
@@ -174,7 +175,7 @@ export async function buildCertificateNotificationEmail({
         const daysLeft = Math.ceil(
           (domain.certExpiresAt.getTime() - referenceDate.getTime()) / MS_PER_DAY,
         );
-        return `${domain.domain}: expires ${domain.certExpiresAt.toISOString()} (${daysLeft} days left)${domain.notes ? `\nNotes: ${domain.notes}` : ""}`;
+        return `${domain.domain}: expires ${domain.certExpiresAt.toISOString()} (${daysLeft} days left)${domain.certIp ? `\nEarliest expiry IP: ${domain.certIp}` : ""}${domain.notes ? `\nNotes: ${domain.notes}` : ""}`;
       }),
       ...failedDomains.map(
         (domain) =>
@@ -189,14 +190,16 @@ export async function buildCertificateNotificationEmail({
         const daysLeft = Math.ceil(
           (domain.certExpiresAt.getTime() - referenceDate.getTime()) / MS_PER_DAY,
         );
-        return `${domain.domain}: ${daysLeft} days left (${domain.certExpiresAt.toISOString().split("T")[0]})`;
+        return `${domain.domain}: ${daysLeft} days left (${domain.certExpiresAt.toISOString().split("T")[0]})${domain.certIp ? ` [${domain.certIp}]` : ""}`;
       }),
       ...failedDomains.map((domain) => `${domain.domain}: ${domain.certError}`),
     ].join("\n"),
     preview: previewParts.join(" "),
     domainNames: [
-      ...expiringDomains.map((domain) => domain.domain),
-      ...failedDomains.map((domain) => domain.domain),
+      ...new Set([
+        ...expiringDomains.map((domain) => domain.domain),
+        ...failedDomains.map((domain) => domain.domain),
+      ]),
     ],
   };
 }
@@ -239,6 +242,7 @@ export function domainsExpiringBy(
   domains: Array<{
     domain: string;
     certExpiresAt: Date | null;
+    certIp?: string | null;
     certError?: string | null;
     notes: string | null;
   }>,
@@ -247,7 +251,9 @@ export function domainsExpiringBy(
   return domains
     .filter(
       (domain): domain is ExpiringCertificateNotificationDomain =>
-        !domain.certError &&
+        // A partial failure must not hide a successfully observed expiring certificate.
+        // Failed legacy snapshots without a certIp may contain stale expiry data.
+        (!domain.certError || !!domain.certIp) &&
         domain.certExpiresAt !== null &&
         domain.certExpiresAt.getTime() <= thresholdDate.getTime(),
     )

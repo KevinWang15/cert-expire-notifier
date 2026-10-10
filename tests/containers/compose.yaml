@@ -19,6 +19,31 @@ x-mock: &mock
     retries: 30
 
 services:
+  unit:
+    image: cert-expire-notifier-container-test:unit
+    profiles: [unit]
+    build:
+      context: ../..
+      dockerfile: k3s/Dockerfile.multistage
+      target: builder
+    working_dir: /app/server
+    entrypoint:
+      [
+        "node",
+        "-r",
+        "ts-node/register",
+        "-r",
+        "tsconfig-paths/register",
+        "--test",
+        "tests/certificates.test.cjs",
+        "tests/notifications.test.cjs",
+      ]
+    environment:
+      TS_NODE_PROJECT: tsconfig.json
+    volumes:
+      - ../../server/tests:/app/server/tests:ro
+    network_mode: none
+
   mysql:
     image: mysql:8.4
     command: ["--innodb-use-native-aio=0"]
@@ -79,7 +104,29 @@ services:
         condition: service_completed_successfully
     networks:
       test:
-        aliases: [expiring.example.test, healthy.example.test, broken.example.test]
+        aliases:
+          [
+            expiring.example.test,
+            healthy.example.test,
+            broken.example.test,
+            multi.example.test,
+            partial.example.test,
+          ]
+
+  certificate-secondary:
+    <<: *mock
+    environment:
+      MOCK_KIND: certificate
+      CERTIFICATE_PROFILE: healthy
+    volumes:
+      - ./:/fixtures:ro
+      - certificates:/certificates:ro
+    depends_on:
+      certificates:
+        condition: service_completed_successfully
+    networks:
+      test:
+        aliases: [multi.example.test, partial.example.test]
 
   app: &app
     image: cert-expire-notifier-container-test:local
@@ -112,6 +159,8 @@ services:
       webhook:
         condition: service_healthy
       certificate:
+        condition: service_healthy
+      certificate-secondary:
         condition: service_healthy
     networks: [test]
     healthcheck:
