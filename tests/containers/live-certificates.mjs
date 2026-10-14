@@ -8,6 +8,7 @@ import { readFile, writeFile } from "node:fs/promises";
 const app = process.env.APP_URL;
 const email = process.env.EMAIL_URL;
 const hostname = process.env.LIVE_CERT_DOMAIN?.trim();
+const ipv4Only = process.env.CERT_CHECK_IPV4_ONLY?.trim().toLowerCase() !== "false";
 assert.ok(hostname, "Set LIVE_CERT_DOMAIN to a multi-IP hostname to test");
 assert.equal(new URL(app).hostname, "app", "Use the dedicated Compose test stack");
 assert.match(hostname, /^[a-z0-9.-]+\.[a-z]{2,}$/i);
@@ -121,7 +122,9 @@ async function probeIp(ip) {
 async function resolveIps() {
   return [
     ...new Set(
-      (await dns.lookup(hostname, { all: true, verbatim: true })).map(({ address }) => address),
+      (await dns.lookup(hostname, { all: true, verbatim: true, family: ipv4Only ? 4 : 0 })).map(
+        ({ address }) => address,
+      ),
     ),
   ].sort();
 }

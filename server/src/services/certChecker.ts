@@ -5,6 +5,7 @@ import { parseDomainTarget, type DomainTarget } from "../utils/domain";
 import { CERT_CHECK_TIMEOUT_MS, type CertificateTarget } from "./certificateProbe";
 import { getConfiguredProxyUrls } from "./certificateProxyConfig";
 import { checkCertificateWithRetries } from "./certificateRetries";
+import { isCertCheckIpv4Only } from "./certificateNetworkConfig";
 
 export { logCertCheckProxyConfig } from "./certificateProxyConfig";
 
@@ -24,16 +25,25 @@ async function resolveTargets(target: DomainTarget): Promise<CertificateTarget[]
   }
 
   let timeout: NodeJS.Timeout | undefined;
+  const ipv4Only = isCertCheckIpv4Only();
   try {
-    // Use the system resolver (including /etc/hosts), requesting both IPv4 and IPv6.
+    // Keep system resolution (including /etc/hosts), restricted to the allowed family.
     const addresses = await Promise.race([
-      dns.lookup(target.host, { all: true, verbatim: true }),
+      dns.lookup(target.host, { all: true, verbatim: true, family: ipv4Only ? 4 : 0 }),
       new Promise<never>((_, reject) => {
         timeout = setTimeout(() => reject(new Error("DNS lookup timeout")), CERT_CHECK_TIMEOUT_MS);
       }),
     ]);
-    const uniqueAddresses = [...new Set(addresses.map(({ address }) => address))].sort();
-    if (!uniqueAddresses.length) throw new Error("No IP addresses found");
+    const uniqueAddresses = [
+      ...new Set(
+        addresses
+          .filter(({ address }) => !ipv4Only || isIP(address) === 4)
+          .map(({ address }) => address),
+      ),
+    ].sort();
+    if (!uniqueAddresses.length) {
+      throw new Error(ipv4Only ? "No IPv4 addresses found" : "No IP addresses found");
+    }
     return uniqueAddresses.map((address) => ({
       hostname: target.host,
       port: target.port,
@@ -75,6 +85,15 @@ export async function checkCertForDomainWithRetries(
       issuer: null,
       ip: null,
       error: "Invalid domain target",
+      ipResults: [],
+    };
+  }
+  if (isCertCheckIpv4Only() && isIP(target.resolveAddress || target.host) === 6) {
+    return {
+      expiresAt: null,
+      issuer: null,
+      ip: null,
+      error: "IPv6 certificate targets are disabled by CERT_CHECK_IPV4_ONLY",
       ipResults: [],
     };
   }

@@ -2,6 +2,8 @@
 services:
   app:
     networks: [test, inspection]
+    environment:
+      CERT_CHECK_IPV4_ONLY: "${CERT_CHECK_IPV4_ONLY:-true}"
 
   live-certificates:
     image: cert-expire-notifier-container-test:local
@@ -11,6 +13,7 @@ services:
       APP_URL: http://app:3000
       EMAIL_URL: http://email:8080
       LIVE_CERT_DOMAIN: "${LIVE_CERT_DOMAIN:?Set LIVE_CERT_DOMAIN to a multi-IP hostname to test}"
+      CERT_CHECK_IPV4_ONLY: "${CERT_CHECK_IPV4_ONLY:-true}"
     volumes:
       - ./:/fixtures:ro
       - ./artifacts:/artifacts

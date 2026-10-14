@@ -5,6 +5,7 @@ import { HttpsProxyAgent } from "https-proxy-agent";
 import { SocksClient } from "socks";
 import type { CertificateResult } from "@shared/types/certificates";
 import { DEFAULT_CERT_PORT } from "../utils/domain";
+import { isCertCheckIpv4Only } from "./certificateNetworkConfig";
 
 export const CERT_CHECK_TIMEOUT_MS = 10000;
 
@@ -85,6 +86,11 @@ export function probeCertificate(
     signal?.addEventListener("abort", onAbort, { once: true });
 
     try {
+      const ipv4Only = isCertCheckIpv4Only();
+      if (ipv4Only && isIP(target.address) === 6) {
+        throw new Error("IPv6 certificate targets are disabled by CERT_CHECK_IPV4_ONLY");
+      }
+      const familyOptions = ipv4Only ? { family: 4 } : {};
       // Do not send an IP literal as SNI when monitoring a literal IPv4 target.
       const servername = isIP(target.hostname) ? undefined : target.hostname;
       const connectTls = (tunnel?: net.Socket) => {
@@ -95,6 +101,7 @@ export function probeCertificate(
         socket = tls.connect(
           {
             ...(tunnel ? { socket: tunnel } : { host: target.address, port: target.port }),
+            ...familyOptions,
             servername,
             rejectUnauthorized: false,
           },
@@ -111,14 +118,17 @@ export function probeCertificate(
       }
 
       const proxy = new URL(proxyUrl);
+      const host = proxy.hostname.replace(/^\[|\]$/g, "");
+      if (ipv4Only && isIP(host) === 6) {
+        throw new Error("IPv6 proxy addresses are disabled by CERT_CHECK_IPV4_ONLY");
+      }
       if (proxy.protocol.startsWith("socks")) {
-        const host = proxy.hostname.replace(/^\[|\]$/g, "");
         const port = Number(proxy.port) || 1080;
         const userId = decodeURIComponent(proxy.username);
         const password = decodeURIComponent(proxy.password);
         // Own the TCP socket before negotiation so cancellation can close it.
         // SOCKS agents do not expose their socket until negotiation finishes.
-        transport = net.connect({ host, port });
+        transport = net.connect({ host, port, ...familyOptions });
         transport.on("error", fail);
         transport.on("close", () => fail(new Error("SOCKS connection closed")));
         transport.once("connect", () => {
@@ -142,6 +152,7 @@ export function probeCertificate(
       }
 
       agent = new HttpsProxyAgent(proxy, {
+        ...familyOptions,
         timeout: CERT_CHECK_TIMEOUT_MS,
         signal: controller.signal,
       });

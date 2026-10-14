@@ -1,9 +1,11 @@
 const assert = require("node:assert/strict");
 const { test, before, after, beforeEach } = require("node:test");
-const dns = require("node:dns").promises;
+const dnsModule = require("node:dns");
+const dns = dnsModule.promises;
 const tls = require("node:tls");
 const net = require("node:net");
 const http = require("node:http");
+const https = require("node:https");
 const timers = require("node:timers/promises");
 const wait = timers.setTimeout;
 const { once } = require("node:events");
@@ -16,6 +18,7 @@ const {
   checkCertForDomainWithRetries,
   summarizeCertificates,
 } = require("../src/services/certChecker");
+const { probeCertificate } = require("../src/services/certificateProbe");
 const { updateDomainCertificateState } = require("../src/services/domainCertificateState");
 const {
   domainsExpiringBy,
@@ -29,6 +32,7 @@ const {
 } = require("../src/services/certificateProxyConfig");
 
 const originalProxyUrls = process.env.CERT_CHECK_PROXY_URLS;
+const originalIpv4Only = process.env.CERT_CHECK_IPV4_ONLY;
 const hostname = "certificates.example.test";
 const servers = [];
 const sockets = new Set();
@@ -68,15 +72,15 @@ function tunnel(downstream, head, address = "127.0.0.2") {
   upstream.on("close", () => downstream.destroy());
 }
 
-async function httpProxy(connect) {
+async function httpProxy(connect, tlsOptions) {
   const requests = [];
-  const server = http.createServer();
+  const server = tlsOptions ? https.createServer(tlsOptions) : http.createServer();
   server.on("connect", (request, downstream, head) => {
     requests.push(request);
     connect(request, downstream, head, requests.length);
   });
   const proxyPort = await listen(server, "127.0.0.1");
-  return { server, requests, url: `http://127.0.0.1:${proxyPort}` };
+  return { server, requests, url: `${tlsOptions ? "https" : "http"}://127.0.0.1:${proxyPort}` };
 }
 
 async function stalledServer() {
@@ -138,6 +142,7 @@ before(async () => {
 });
 beforeEach((t) => {
   delete process.env.CERT_CHECK_PROXY_URLS;
+  delete process.env.CERT_CHECK_IPV4_ONLY;
   handshakes.length = 0;
   // Speed up recovery pauses, leaving actual socket deadlines untouched.
   t.mock.method(timers, "setTimeout", (delay, value, options) =>
@@ -150,13 +155,70 @@ after(async () => {
   if (fixtureDir) rmSync(fixtureDir, { recursive: true, force: true });
   if (originalProxyUrls === undefined) delete process.env.CERT_CHECK_PROXY_URLS;
   else process.env.CERT_CHECK_PROXY_URLS = originalProxyUrls;
+  if (originalIpv4Only === undefined) delete process.env.CERT_CHECK_IPV4_ONLY;
+  else process.env.CERT_CHECK_IPV4_ONLY = originalIpv4Only;
   await prisma.$disconnect();
 });
 
+test("default checks ignore unreachable IPv6 answers and only connect to unique IPv4 addresses", async (t) => {
+  const lookup = resolve(t, ["127.0.0.1", "127.0.0.2", "240e:f7:c000:317::12", "127.0.0.1"]);
+  const connect = t.mock.method(tls, "connect");
+  const result = await checkCertForDomainWithRetries(`${hostname}:${port}`);
+  assert.equal(lookup.mock.calls[0].arguments[1].family, 4);
+  assert.deepEqual(
+    result.ipResults.map((entry) => entry.ip),
+    ["127.0.0.1", "127.0.0.2"],
+  );
+  assert.equal(result.error, null);
+  assert.equal(result.ip, "127.0.0.2");
+  assert.equal(result.issuer, "expiring test issuer");
+  assert.equal(connect.mock.callCount(), 2);
+  assert.ok(connect.mock.calls.every((call) => net.isIPv4(call.arguments[0].host)));
+  assert.ok(handshakes.every((entry) => entry.servername === hostname));
+});
+
+test("IPv4-only checks report IPv6-only DNS answers without opening any connections", async (t) => {
+  process.env.CERT_CHECK_IPV4_ONLY = " TRUE ";
+  resolve(t, ["::1"]);
+  const connect = t.mock.method(tls, "connect");
+  const result = await checkCertForDomainWithRetries(`${hostname}:${port}`);
+  assert.match(result.error, /No IPv4 addresses found/);
+  assert.deepEqual(result.ipResults, []);
+  assert.equal(result.expiresAt, null);
+  assert.equal(connect.mock.callCount(), 0);
+});
+
+test("IPv4-only checks reject IPv6 overrides and proxy literals before connecting", async (t) => {
+  const lookup = t.mock.method(dns, "lookup", () => {
+    throw new Error("DNS must not run");
+  });
+  const tcpConnect = t.mock.method(net, "connect");
+  const tlsConnect = t.mock.method(tls, "connect");
+  const result = await checkCertForDomainWithRetries(`${hostname}:${port}:[::1]`);
+  assert.match(result.error, /IPv6 certificate targets are disabled/);
+  assert.deepEqual(result.ipResults, []);
+  assert.match(
+    (await probeCertificate({ hostname, address: "::1", port })).error,
+    /IPv6 certificate targets are disabled/,
+  );
+  for (const protocol of ["http", "https", "socks4", "socks5h"]) {
+    const result = await probeCertificate(
+      { hostname, address: "127.0.0.1", port },
+      `${protocol}://[::1]:1080`,
+    );
+    assert.match(result.error, /IPv6 proxy addresses are disabled/);
+  }
+  assert.equal(lookup.mock.callCount(), 0);
+  assert.equal(tcpConnect.mock.callCount(), 0);
+  assert.equal(tlsConnect.mock.callCount(), 0);
+});
+
 test("checks every unique IPv4 and IPv6 address with domain SNI and selects matching earliest issuer", async (t) => {
+  process.env.CERT_CHECK_IPV4_ONLY = "false";
   const lookup = resolve(t, ["127.0.0.1", "127.0.0.2", "::1", "127.0.0.1"]);
   const result = await checkCertForDomainWithRetries(`${hostname}:${port}`);
   assert.equal(lookup.mock.callCount(), 1);
+  assert.equal(lookup.mock.calls[0].arguments[1].family, 0);
   assert.deepEqual(
     result.ipResults.map((entry) => entry.ip),
     ["127.0.0.1", "127.0.0.2", "::1"],
@@ -173,6 +235,7 @@ test("checks every unique IPv4 and IPv6 address with domain SNI and selects matc
 });
 
 test("IP overrides skip DNS and only probe the requested IPv4 or IPv6 address", async (t) => {
+  process.env.CERT_CHECK_IPV4_ONLY = "false";
   const lookup = t.mock.method(dns, "lookup", () => {
     throw new Error("DNS must not run");
   });
@@ -220,7 +283,8 @@ test("HTTP proxy fallback tunnels to the failing IP and preserves domain SNI", a
     upstream.on("close", () => downstream.destroy());
   });
   const proxyPort = await listen(proxy, "127.0.0.1");
-  process.env.CERT_CHECK_PROXY_URLS = `http://127.0.0.1:${proxyPort}`;
+  process.env.CERT_CHECK_PROXY_URLS = `http://localhost:${proxyPort}`;
+  const proxyLookup = t.mock.method(dnsModule, "lookup");
   // Repeated handshakes also exercise cleanup: aborting the underlying TCP
   // transport after wrapping it in TLS used to crash the Node 20 runtime.
   for (let i = 0; i < 3; i++) {
@@ -230,7 +294,37 @@ test("HTTP proxy fallback tunnels to the failing IP and preserves domain SNI", a
     assert.equal(result.issuer, "expiring test issuer");
   }
   assert.deepEqual(destinations, Array(3).fill(`127.0.0.3:${port}`));
+  assert.equal(proxyLookup.mock.callCount(), 3);
+  assert.ok(proxyLookup.mock.calls.every((call) => call.arguments[1].family === 4));
   assert.ok(handshakes.every((entry) => entry.servername === hostname));
+});
+
+test("HTTPS proxy hostnames connect over IPv4 and tunnel to the pinned IPv4 address", async (t) => {
+  resolve(t, ["127.0.0.3"]);
+  const proxy = await httpProxy(
+    (_request, socket, head) => tunnel(socket, head),
+    certificates.healthy,
+  );
+  process.env.CERT_CHECK_PROXY_URLS = proxy.url.replace("127.0.0.1", "localhost");
+  const proxyLookup = t.mock.method(dnsModule, "lookup");
+  const connect = tls.connect;
+  // Trust the local proxy fixture; production proxy TLS verification is unchanged.
+  t.mock.method(tls, "connect", (options, ...args) =>
+    connect(
+      options.host === "localhost"
+        ? { ...options, ca: certificates.healthy.cert, checkServerIdentity: () => undefined }
+        : options,
+      ...args,
+    ),
+  );
+  const result = await checkCertForDomainWithRetries(`${hostname}:${port}`, 1);
+  assert.equal(result.error, null);
+  assert.equal(result.ip, "127.0.0.3");
+  assert.equal(result.issuer, "expiring test issuer");
+  assert.equal(proxy.requests[0].url, `127.0.0.3:${port}`);
+  assert.equal(proxyLookup.mock.callCount(), 1);
+  assert.equal(proxyLookup.mock.calls[0].arguments[1].family, 4);
+  assert.deepEqual(handshakes, [{ address: "127.0.0.2", servername: hostname }]);
 });
 
 test("SOCKS5 fallback sends the pinned IP rather than letting the proxy resolve the hostname", async (t) => {
@@ -263,12 +357,15 @@ test("SOCKS5 fallback sends the pinned IP rather than letting the proxy resolve 
     downstream.on("data", receive);
   });
   const proxyPort = await listen(proxy, "127.0.0.1");
-  process.env.CERT_CHECK_PROXY_URLS = `socks5h://127.0.0.1:${proxyPort}`;
+  process.env.CERT_CHECK_PROXY_URLS = `socks5h://localhost:${proxyPort}`;
+  const proxyLookup = t.mock.method(dnsModule, "lookup");
   const result = await checkCertForDomainWithRetries(`${hostname}:${port}`, 1);
   assert.equal(result.error, null);
   assert.equal(result.ip, "127.0.0.3");
   assert.equal(result.issuer, "expiring test issuer");
   assert.deepEqual(destinations, [`127.0.0.3:${port}`]);
+  assert.equal(proxyLookup.mock.callCount(), 1);
+  assert.equal(proxyLookup.mock.calls[0].arguments[1].family, 4);
   assert.deepEqual(handshakes, [{ address: "127.0.0.2", servername: hostname }]);
 });
 
@@ -454,6 +551,7 @@ test("success for one IP leaves another IP's proxy recovery running and keeps th
 });
 
 test("IPv6 overrides keep the address pinned through HTTP CONNECT recovery without DNS", async (t) => {
+  process.env.CERT_CHECK_IPV4_ONLY = "false";
   t.mock.method(dns, "lookup", () => {
     throw new Error("DNS must not run");
   });
@@ -564,7 +662,7 @@ test("DNS errors, empty answers and invalid targets cannot report success", asyn
   t.mock.restoreAll();
   resolve(t, []);
   result = await checkCertForDomainWithRetries(hostname);
-  assert.match(result.error, /No IP addresses found/);
+  assert.match(result.error, /No IPv4 addresses found/);
   result = await checkCertForDomainWithRetries("not a domain");
   assert.equal(result.error, "Invalid domain target");
   assert.equal(result.expiresAt, null);
@@ -580,9 +678,12 @@ test("expired certificates take precedence over future certificates and preserve
   assert.equal(result.expiresAt.getUTCFullYear(), 2000);
 });
 
-test("each persisted snapshot replaces removed IPs and clears stale certificates after total failure", async (t) => {
-  let addresses = ["127.0.0.1", "127.0.0.2"];
-  t.mock.method(dns, "lookup", async () => addresses.map((address) => ({ address, family: 4 })));
+test("each persisted snapshot replaces removed or disabled IPs and clears stale errors and certificates", async (t) => {
+  process.env.CERT_CHECK_IPV4_ONLY = "false";
+  let addresses = ["127.0.0.1", "127.0.0.2", "::2"];
+  t.mock.method(dns, "lookup", async () =>
+    addresses.map((address) => ({ address, family: net.isIP(address) })),
+  );
   const originalUpdate = prisma.domain.update;
   const update = t.mock.fn(async ({ data }) => data);
   prisma.domain.update = update;
@@ -591,13 +692,16 @@ test("each persisted snapshot replaces removed IPs and clears stale certificates
   });
   const first = await updateDomainCertificateState(7, `${hostname}:${port}`);
   assert.equal(first.certIp, "127.0.0.2");
-  assert.equal(first.lastIpResults.length, 2);
+  assert.equal(first.lastIpResults.length, 3);
+  assert.match(first.certError, /1 of 3 IP checks failed: ::2/);
   assert.equal(typeof first.lastIpResults[0].expiresAt, "string");
-  addresses = ["127.0.0.1"];
+  delete process.env.CERT_CHECK_IPV4_ONLY;
+  addresses = ["127.0.0.1", "::2"];
   const second = await updateDomainCertificateState(7, `${hostname}:${port}`);
   assert.equal(second.certIp, "127.0.0.1");
   assert.ok(second.certExpiresAt > first.certExpiresAt);
   assert.equal(second.lastIpResults.length, 1);
+  assert.equal(second.certError, null);
   addresses = ["127.0.0.3"];
   const failed = await updateDomainCertificateState(7, `${hostname}:${port}`);
   assert.equal(failed.certExpiresAt, null);

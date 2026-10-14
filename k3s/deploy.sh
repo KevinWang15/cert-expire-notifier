@@ -142,6 +142,7 @@ create_app_secret() {
     write_env_key ENGAGE_LAB_FROM_EMAIL
     write_env_key HEALTHCHECKS_PING_URL
     write_env_key CERT_CHECK_CRON
+    write_env_key CERT_CHECK_IPV4_ONLY
     write_env_key CERT_CHECK_PROXY_URLS
     write_env_key CERT_EXPIRY_THRESHOLD_DAYS
     write_env_key WEBHOOK_ALLOW_PRIVATE_IPS
